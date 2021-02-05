@@ -1898,6 +1898,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "libc-nnsdk"
+version = "0.0.1"
+source = "git+https://github.com/ultimate-research/libc-nnsdk.git#82a83a6ebd519babb90b41bc9da4f564c367d54c"
+dependencies = [
+ "rustc-std-workspace-core",
+]
+
+[[package]]
 name = "libgit2-sys"
 version = "0.12.18+1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2319,6 +2327,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4a24736216ec316047a1fc4252e27dabb04218aa4a3f37c6e7ddbf1f9782b54"
 
 [[package]]
+name = "nnsdk"
+version = "0.1.0"
+source = "git+https://github.com/ultimate-research/nnsdk-rs.git#791aebe9b101fa269690fad5918fdd615573c98e"
+dependencies = [
+ "libc-nnsdk",
+]
+
+[[package]]
 name = "num-integer"
 version = "0.1.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2483,7 +2499,7 @@ dependencies = [
  "cfg-if 0.1.10",
  "compiler_builtins",
  "core",
- "libc",
+ "libc-nnsdk",
 ]
 
 [[package]]
@@ -4908,6 +4924,7 @@ dependencies = [
  "hermit-abi",
  "libc",
  "miniz_oxide",
+ "nnsdk",
  "object",
  "panic_abort",
  "panic_unwind",

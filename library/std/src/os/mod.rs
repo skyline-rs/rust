@@ -117,6 +117,9 @@ mod imp {
 
     #[cfg(windows)]
     pub mod windows;
+
+    #[cfg(target_os = "switch")]
+    pub mod switch;
 }
 #[cfg(not(doc))]
 #[stable(feature = "os", since = "1.0.0")]
