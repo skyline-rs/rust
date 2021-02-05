@@ -25,6 +25,21 @@ mod android;
 use core::any::Any;
 use core::panic::BoxMeUp;
 
+
+extern "C" {
+    /// a
+    #[stable(feature = "rust1", since = "1.0.0")]
+    fn skyline_tcp_send_raw(bytes: *const u8, usize: u64);
+}
+
+/// Log a string through skyline
+#[stable(feature = "rust1", since = "1.0.0")]
+pub fn skyline_log(string: &str) {
+    unsafe {
+        skyline_tcp_send_raw(string.as_bytes().as_ptr(), string.as_bytes().len() as u64)
+    }
+}
+
 #[rustc_std_internal_symbol]
 #[allow(improper_ctypes_definitions)]
 pub unsafe extern "C" fn __rust_panic_cleanup(_: *mut u8) -> *mut (dyn Any + Send + 'static) {
@@ -54,6 +69,16 @@ pub unsafe extern "C" fn __rust_start_panic(_payload: *mut &mut dyn BoxMeUp) -> 
                     pub fn __rust_abort() -> !;
                 }
                 __rust_abort();
+            }
+        } else if #[cfg(target_os = "switch")] {
+            unsafe fn abort() -> ! {
+                #[link_name = "\u{1}_ZN2nn2os11SleepThreadENS_8TimeSpanE"]
+                extern "C" { fn sleep(amt: TimeSpan); }
+        
+                #[repr(C)] struct TimeSpan { pub nanoseconds: u64 };
+        
+                sleep(TimeSpan { nanoseconds: 100000000 });
+                libc::abort();
             }
         } else if #[cfg(all(windows, not(miri)))] {
             // On Windows, use the processor-specific __fastfail mechanism. In Windows 8
