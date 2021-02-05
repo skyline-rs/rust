@@ -145,3 +145,6 @@ pub mod vxworks;
 
 #[cfg(any(unix, target_os = "wasi", doc))]
 mod fd;
+
+#[cfg(target_os = "switch")]
+pub mod switch;
