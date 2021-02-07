@@ -1901,8 +1901,9 @@ impl Path {
                 component.to_str()
                     .map(|component| component.contains(":"))
                     .unwrap_or(false)
-        } else {
-            false
+            } else {
+                false
+            }
         } else {
             self.has_root() && (cfg!(any(unix, target_os = "wasi")) || self.prefix().is_some())
         }
