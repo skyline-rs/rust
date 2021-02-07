@@ -23,7 +23,6 @@ mod android;
 use core::any::Any;
 use core::panic::BoxMeUp;
 
-
 extern "C" {
     /// a
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -33,9 +32,7 @@ extern "C" {
 /// Log a string through skyline
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn skyline_log(string: &str) {
-    unsafe {
-        skyline_tcp_send_raw(string.as_bytes().as_ptr(), string.as_bytes().len() as u64)
-    }
+    unsafe { skyline_tcp_send_raw(string.as_bytes().as_ptr(), string.as_bytes().len() as u64) }
 }
 
 #[rustc_std_internal_symbol]
@@ -73,11 +70,21 @@ pub unsafe extern "C-unwind" fn __rust_start_panic(_payload: *mut &mut dyn BoxMe
             unsafe fn abort() -> ! {
                 #[link_name = "\u{1}_ZN2nn2os11SleepThreadENS_8TimeSpanE"]
                 extern "C" { fn sleep(amt: TimeSpan); }
-        
+
                 #[repr(C)] struct TimeSpan { pub nanoseconds: u64 };
-        
+
                 sleep(TimeSpan { nanoseconds: 100000000 });
                 libc::abort();
+            }
+        } else if #[cfg(any(target_os = "hermit",
+                            all(target_vendor = "fortanix", target_env = "sgx")
+        ))] {
+            unsafe fn abort() -> ! {
+                // call std::sys::abort_internal
+                extern "C" {
+                    pub fn __rust_abort() -> !;
+                }
+                __rust_abort();
             }
         } else if #[cfg(all(windows, not(miri)))] {
             // On Windows, use the processor-specific __fastfail mechanism. In Windows 8
