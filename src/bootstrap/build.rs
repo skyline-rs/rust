@@ -17,6 +17,7 @@ fn main() {
             }
         }
     }
+
     assert!(rustc.is_absolute());
 
     // FIXME: if the path is not utf-8, this is going to break. Unfortunately

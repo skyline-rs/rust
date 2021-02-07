@@ -4922,7 +4922,7 @@ dependencies = [
  "fortanix-sgx-abi",
  "hashbrown",
  "hermit-abi",
- "libc",
+ "libc-nnsdk",
  "miniz_oxide",
  "nnsdk",
  "object",

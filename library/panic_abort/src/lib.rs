@@ -58,16 +58,6 @@ pub unsafe extern "C-unwind" fn __rust_start_panic(_payload: *mut &mut dyn BoxMe
             unsafe fn abort() -> ! {
                 libc::abort();
             }
-        } else if #[cfg(any(target_os = "hermit",
-                            all(target_vendor = "fortanix", target_env = "sgx")
-        ))] {
-            unsafe fn abort() -> ! {
-                // call std::sys::abort_internal
-                extern "C" {
-                    pub fn __rust_abort() -> !;
-                }
-                __rust_abort();
-            }
         } else if #[cfg(target_os = "switch")] {
             unsafe fn abort() -> ! {
                 #[link_name = "\u{1}_ZN2nn2os11SleepThreadENS_8TimeSpanE"]
@@ -77,6 +67,16 @@ pub unsafe extern "C-unwind" fn __rust_start_panic(_payload: *mut &mut dyn BoxMe
         
                 sleep(TimeSpan { nanoseconds: 100000000 });
                 libc::abort();
+            }
+        } else if #[cfg(any(target_os = "hermit",
+                            all(target_vendor = "fortanix", target_env = "sgx")
+        ))] {
+            unsafe fn abort() -> ! {
+                // call std::sys::abort_internal
+                extern "C" {
+                    pub fn __rust_abort() -> !;
+                }
+                __rust_abort();
             }
         } else if #[cfg(all(windows, not(miri)))] {
             // On Windows, use the processor-specific __fastfail mechanism. In Windows 8
