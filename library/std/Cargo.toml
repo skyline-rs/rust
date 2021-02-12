@@ -55,8 +55,8 @@ wasi = { version = "0.9.0", features = ['rustc-dep-of-std'], default-features = 
 libc = { version = "0.2.79", default-features = false, features = ['rustc-dep-of-std'] }
 
 [target.aarch64-skyline-switch.dependencies]
-libc-nnsdk = { git = "https://github.com/ultimate-research/libc-nnsdk.git", features = ['rustc-dep-of-std']}
-nnsdk = { path = "../../../nnsdk-rs", features = ["rustc-dep-of-std"] }
+libc-nnsdk = { git = "https://github.com/inspier/libc-nnsdk.git", features = ['rustc-dep-of-std']}
+nnsdk = { git = "https://github.com/inspier/nnsdk-rs.git", features = ["rustc-dep-of-std"] }
 
 [features]
 backtrace = [
