@@ -35,6 +35,8 @@ config.stamp
 no_llvm_build
 
 ## Build
+/build/
+/dist/
 /dl/
 /doc/
 /inst/
