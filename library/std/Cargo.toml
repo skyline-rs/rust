@@ -17,8 +17,8 @@ panic_unwind = { path = "../panic_unwind", optional = true }
 panic_abort = { path = "../panic_abort" }
 core = { path = "../core" }
 compiler_builtins = { version = "0.1.43" }
-libc-nnsdk = { git = "https://github.com/ultimate-research/libc-nnsdk.git", features = ['rustc-dep-of-std']}
-nnsdk = { git = "https://github.com/ultimate-research/nnsdk-rs.git", features = ["rustc-dep-of-std"] }
+#libc-nnsdk = { git = "https://github.com/ultimate-research/libc-nnsdk.git", features = ['rustc-dep-of-std']}
+#nnsdk = { git = "https://github.com/ultimate-research/nnsdk-rs.git", features = ["rustc-dep-of-std"] }
 #nnsdk = { path = "../../../nnsdk-rs", features = ["rustc-dep-of-std"] }
 #libc = { version = "0.2.79", default-features = false, features = ['rustc-dep-of-std'] }
 profiler_builtins = { path = "../profiler_builtins", optional = true }
@@ -51,8 +51,12 @@ hermit-abi = { version = "0.1.17", features = ['rustc-dep-of-std'] }
 [target.wasm32-wasi.dependencies]
 wasi = { version = "0.9.0", features = ['rustc-dep-of-std'], default-features = false }
 
-# [target.aarch64-skyline-switch.dependencies]
-# nnsdk = { git = "https://github.com/ultimate-research/nnsdk-rs.git", features = ["rustc-dep-of-std"] }
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+libc = { version = "0.2.79", default-features = false, features = ['rustc-dep-of-std'] }
+
+[target.aarch64-skyline-switch.dependencies]
+libc-nnsdk = { git = "https://github.com/ultimate-research/libc-nnsdk.git", features = ['rustc-dep-of-std']}
+nnsdk = { path = "../../../nnsdk-rs", features = ["rustc-dep-of-std"] }
 
 [features]
 backtrace = [

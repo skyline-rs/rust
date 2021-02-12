@@ -177,6 +177,7 @@ pub fn take_hook() -> Box<dyn Fn(&PanicInfo<'_>) + 'static + Sync + Send> {
     }
 }
 
+#[cfg(target = "aarch64-skyline-switch")]
 fn show_error(code: u32, message: &core::primitive::str, details: &core::primitive::str) {
     use nnsdk::{err, settings};
 
@@ -201,7 +202,7 @@ fn show_error(code: u32, message: &core::primitive::str, details: &core::primiti
         Ok(s) => s,
         Err(e) => "Unable to parse error details.\0"
     };
-    
+
     unsafe {
         let error = err::ApplicationErrorArg::new_with_messages(
             code,
@@ -239,6 +240,7 @@ fn default_hook(info: &PanicInfo<'_>) {
     let write = |err: &mut dyn crate::io::Write| {
         let err_msg = format!("Thread '{}' panicked at '{}', {}", name, msg, location);
         let _ = writeln!(err, "{}", err_msg.as_str());
+        #[cfg(target = "aarch64-skyline-switch")]
         show_error(
             69,
             "Skyline plugin has panicked! Please open the details and send a screenshot to the developer, then close the game.\n",
