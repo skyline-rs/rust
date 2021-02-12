@@ -24,9 +24,9 @@ fn max_len() -> usize {
     // larger than or equal to INT_MAX. To handle both of these the read
     // size is capped on both platforms.
     if cfg!(target_os = "macos") {
-        <c_int>::max_value() as usize - 1
+        <c_int>::MAX as usize - 1
     } else {
-        <ssize_t>::max_value() as usize
+        <ssize_t>::MAX as usize
     }
 }
 
@@ -58,7 +58,7 @@ impl FileDesc {
             libc::readv(
                 self.fd,
                 bufs.as_ptr() as *const libc::iovec,
-                cmp::min(bufs.len(), c_int::max_value() as usize) as c_int,
+                cmp::min(bufs.len(), c_int::MAX as usize) as c_int,
             )
         })?;
         Ok(ret as usize)
@@ -110,7 +110,7 @@ impl FileDesc {
             libc::writev(
                 self.fd,
                 bufs.as_ptr() as *const libc::iovec,
-                cmp::min(bufs.len(), c_int::max_value() as usize) as c_int,
+                cmp::min(bufs.len(), c_int::MAX as usize) as c_int,
             )
         })?;
         Ok(ret as usize)
