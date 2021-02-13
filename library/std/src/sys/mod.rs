@@ -45,7 +45,7 @@ cfg_if::cfg_if! {
         pub use self::sgx::*;
     } else if #[cfg(target_os = "switch")] {
         mod switch;
-        pub use switch::*;
+        pub use self::switch::*;
     } else {
         mod unsupported;
         pub use self::unsupported::*;

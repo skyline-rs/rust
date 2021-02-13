@@ -12,12 +12,22 @@ impl AnonPipe {
         match self.0 {}
     }
 
+    #[inline]
+    pub fn is_read_vectored(&self) -> bool {
+        unimplemented!()
+    }
+
     pub fn write(&self, _buf: &[u8]) -> io::Result<usize> {
         match self.0 {}
     }
 
     pub fn write_vectored(&self, _bufs: &[IoSlice<'_>]) -> io::Result<usize> {
         match self.0 {}
+    }
+
+    #[inline]
+    pub fn is_write_vectored(&self) -> bool {
+        unimplemented!()
     }
 
     pub fn diverge(&self) -> ! {
