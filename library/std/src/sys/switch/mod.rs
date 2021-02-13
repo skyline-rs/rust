@@ -60,6 +60,7 @@ pub mod stack_overflow;
 pub mod stdio;
 pub mod thread;
 pub mod thread_local;
+pub mod thread_local_key;
 pub mod time;
 
 pub mod fd;

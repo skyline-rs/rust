@@ -425,6 +425,11 @@ impl File {
         Ok(read)
     }
 
+    #[inline]
+    pub fn is_read_vectored(&self) -> bool {
+        unimplemented!()
+    }
+
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
         ret_if_null!(self.inner);
 
@@ -463,6 +468,11 @@ impl File {
             }
         }
         Ok(written)
+    }
+
+    #[inline]
+    pub fn is_write_vectored(&self) -> bool {
+        unimplemented!()
     }
 
     pub fn flush(&self) -> io::Result<()> {
