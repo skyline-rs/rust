@@ -37,11 +37,11 @@ pub mod thread_parker;
 pub mod wtf8;
 
 cfg_if::cfg_if! {
-    if #[cfg(any(target_os = "l4re",
+    if #[cfg(all(any(target_os = "l4re",
                  target_os = "hermit",
                  feature = "restricted-std",
                  all(target_family = "wasm", not(target_os = "emscripten")),
-                 all(target_vendor = "fortanix", target_env = "sgx")))] {
+                 all(target_vendor = "fortanix", target_env = "sgx")), not(target_os = "switch")))] {
         pub use crate::sys::net;
     } else {
         pub mod net;
