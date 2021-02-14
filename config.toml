@@ -176,7 +176,7 @@ changelog-seen = 2
 # first compiler.
 #
 # Defaults to host platform
-build = "x86_64-unknown-linux-gnu"
+#build = "x86_64-unknown-linux-gnu"
 
 # Which triples to produce a compiler toolchain for. Each of these triples will
 # be bootstrapped from the build triple themselves.

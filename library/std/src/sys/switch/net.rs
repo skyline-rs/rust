@@ -16,6 +16,7 @@ pub use crate::sys::{cvt, cvt_r};
 #[allow(unused_extern_crates)]
 pub extern crate libc as netc;
 
+#[allow(non_camel_case_types)]
 pub type wrlen_t = size_t;
 
 pub struct Socket(FileDesc);
