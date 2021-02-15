@@ -702,7 +702,7 @@ pub fn stat(path: &Path) -> io::Result<FileAttr> {
         //_ => panic!("Bad entry type")
     };
 
-    let mut size: Result<AtomicU64, io::Error> = match file_type {
+    let size: Result<AtomicU64, io::Error> = match file_type {
         FileType::File => {
             let mut inner = FileHandle { handle: 0 as _ };
 

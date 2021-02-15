@@ -10,6 +10,7 @@ impl Stdin {
     }
 }
 
+#[allow(unused_variables)]
 impl io::Read for Stdin {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         unimplemented!()
@@ -35,6 +36,7 @@ impl Stdout {
     }
 }
 
+#[allow(unused_variables)]
 impl io::Write for Stdout {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         unsafe {
@@ -64,6 +66,7 @@ impl Stderr {
     }
 }
 
+#[allow(unused_variables)]
 impl io::Write for Stderr {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         unsafe {

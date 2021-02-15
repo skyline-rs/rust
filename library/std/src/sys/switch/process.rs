@@ -192,6 +192,7 @@ impl<'a> ExactSizeIterator for CommandArgs<'a> {
     }
 }
 
+#[allow(unused_variables)]
 impl<'a> fmt::Debug for CommandArgs<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         unimplemented!();
