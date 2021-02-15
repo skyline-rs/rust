@@ -20,6 +20,7 @@ pub fn abort(args: fmt::Arguments<'_>) -> ! {
 }
 
 #[allow(dead_code)] // stack overflow detection not enabled on all platforms
+#[allow(unused_unsafe)]
 pub unsafe fn report_overflow() {
     dumb_print(format_args!(
         "\nthread '{}' has overflowed its stack\n",
