@@ -337,6 +337,7 @@
 #![feature(vec_spare_capacity)]
 // NB: the above list is sorted to minimize merge conflicts.
 #![default_lib_allocator]
+#![allow(dead_code)]
 
 // Explicitly import the prelude. The compiler uses this same unstable attribute
 // to import the prelude implicitly when building crates that depend on std.
