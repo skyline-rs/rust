@@ -73,7 +73,6 @@ impl Socket {
     }
 
     pub fn new_pair(fam: c_int, ty: c_int) -> io::Result<(Socket, Socket)> {
-        unsafe {
             let mut fds = [0, 0];
 
             cvt(libc::socketpair(fam, ty, 0, fds.as_mut_ptr()))?;
@@ -82,7 +81,6 @@ impl Socket {
             a.set_cloexec()?;
             b.set_cloexec()?;
             Ok((Socket(a), Socket(b)))
-        }
     }
 
     pub fn connect_timeout(&self, addr: &SocketAddr, timeout: Duration) -> io::Result<()> {

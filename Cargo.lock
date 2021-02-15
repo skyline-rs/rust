@@ -1487,9 +1487,9 @@ dependencies = [
 
 [[package]]
 name = "gsgdt"
-version = "0.1.2"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0d876ce7262df96262a2a19531da6ff9a86048224d49580a585fc5c04617825"
+checksum = "cb958139bb971f37d2f5423436f137768f88b9c616b4c21d4f634dd129508d60"
 dependencies = [
  "serde",
 ]
@@ -1900,7 +1900,7 @@ dependencies = [
 [[package]]
 name = "libc-nnsdk"
 version = "0.0.1"
-source = "git+https://github.com/ultimate-research/libc-nnsdk.git#82a83a6ebd519babb90b41bc9da4f564c367d54c"
+source = "git+https://github.com/inspier/libc-nnsdk.git#03ad16e9092631e26c589627330e21a61882b5f2"
 dependencies = [
  "rustc-std-workspace-core",
 ]
@@ -2329,9 +2329,11 @@ checksum = "e4a24736216ec316047a1fc4252e27dabb04218aa4a3f37c6e7ddbf1f9782b54"
 [[package]]
 name = "nnsdk"
 version = "0.1.0"
-source = "git+https://github.com/ultimate-research/nnsdk-rs.git#791aebe9b101fa269690fad5918fdd615573c98e"
+source = "git+https://github.com/inspier/nnsdk-rs.git#9e0c1c2c28f1bf42f8595d030e61a6bf271d39c7"
 dependencies = [
+ "compiler_builtins",
  "libc-nnsdk",
+ "rustc-std-workspace-core",
 ]
 
 [[package]]
@@ -4922,6 +4924,7 @@ dependencies = [
  "fortanix-sgx-abi",
  "hashbrown",
  "hermit-abi",
+ "libc",
  "libc-nnsdk",
  "miniz_oxide",
  "nnsdk",
