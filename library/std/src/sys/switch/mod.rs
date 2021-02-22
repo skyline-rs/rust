@@ -111,8 +111,8 @@ pub unsafe fn strlen(mut s: *const c_char) -> usize {
     return n;
 }
 
-pub unsafe fn abort_internal() -> ! {
-    libc::abort();
+pub fn abort_internal() -> ! {
+    unsafe { libc::abort(); }
 }
 
 // We don't have randomness yet, but I totally used a random number generator to
