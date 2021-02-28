@@ -26,7 +26,7 @@ fn main() {
         || target.contains("vxworks")
         || target.contains("wasm32")
         || target.contains("asmjs")
-        || target.contains("switch")
+        || target.contains("skyline")
     {
         // These platforms don't have any special requirements.
     } else {
