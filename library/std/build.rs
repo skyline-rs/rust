@@ -30,6 +30,7 @@ fn main() {
         || target.contains("espidf")
         || target.contains("solid")
         || target.contains("switch")
+        || target.contains("skyline")
     {
         // These platforms don't have any special requirements.
     } else {
