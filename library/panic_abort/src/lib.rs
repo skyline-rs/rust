@@ -25,7 +25,6 @@ mod android;
 use core::any::Any;
 use core::panic::BoxMeUp;
 
-
 extern "C" {
     /// a
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -35,9 +34,7 @@ extern "C" {
 /// Log a string through skyline
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn skyline_log(string: &str) {
-    unsafe {
-        skyline_tcp_send_raw(string.as_bytes().as_ptr(), string.as_bytes().len() as u64)
-    }
+    unsafe { skyline_tcp_send_raw(string.as_bytes().as_ptr(), string.as_bytes().len() as u64) }
 }
 
 #[rustc_std_internal_symbol]
@@ -62,8 +59,10 @@ pub unsafe extern "C" fn __rust_start_panic(_payload: *mut &mut dyn BoxMeUp) -> 
             }
         } else if #[cfg(target_os = "switch")] {
             unsafe fn abort() -> ! {
-                #[link_name = "\u{1}_ZN2nn2os11SleepThreadENS_8TimeSpanE"]
-                extern "C" { fn sleep(amt: TimeSpan); }
+                extern "C" {
+                    #[link_name = "\u{1}_ZN2nn2os11SleepThreadENS_8TimeSpanE"]
+                    fn sleep(amt: TimeSpan);
+            }
 
                 #[repr(C)] struct TimeSpan { pub nanoseconds: u64 }
 
