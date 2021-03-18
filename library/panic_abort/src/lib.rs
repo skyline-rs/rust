@@ -62,7 +62,7 @@ pub unsafe extern "C" fn __rust_start_panic(_payload: *mut &mut dyn BoxMeUp) -> 
             }
         } else if #[cfg(target_os = "switch")] {
             unsafe fn abort() -> ! {
-                #[link(name = "\u{1}_ZN2nn2os11SleepThreadENS_8TimeSpanE")]
+                #[link_name = "\u{1}_ZN2nn2os11SleepThreadENS_8TimeSpanE"]
                 extern "C" { fn sleep(amt: TimeSpan); }
 
                 #[repr(C)] struct TimeSpan { pub nanoseconds: u64 }
