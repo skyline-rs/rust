@@ -20,6 +20,7 @@ pub fn target() -> Target {
         has_rpath: false,
         relro_level: RelroLevel::Off,
         //link_script: Some(LINKER_SCRIPT.to_string()),
+        //linker_is_gnu: true,
         ..Default::default()
     };
 
