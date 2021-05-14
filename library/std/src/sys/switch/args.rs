@@ -1,12 +1,11 @@
 use crate::ffi::OsString;
 use crate::marker::PhantomData;
 use crate::vec;
+use crate::fmt;
 
 pub unsafe fn init(_argc: isize, _argv: *const *const u8) {
     // On wasm these should always be null, so there's nothing for us to do here
 }
-
-pub unsafe fn cleanup() {}
 
 pub fn args() -> Args {
     Args { iter: Vec::new().into_iter(), _dont_send_or_sync_me: PhantomData }
@@ -20,6 +19,12 @@ pub struct Args {
 impl Args {
     pub fn inner_debug(&self) -> &[OsString] {
         self.iter.as_slice()
+    }
+}
+
+impl fmt::Debug for Args {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.iter.as_slice().fmt(f)
     }
 }
 

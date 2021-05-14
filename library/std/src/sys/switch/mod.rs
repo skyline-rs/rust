@@ -83,7 +83,9 @@ cfg_if::cfg_if! {
 }
 
 #[cfg(not(test))]
-pub fn init() {}
+pub fn init(_argc: isize, _argv: *const *const u8) {}
+
+pub unsafe fn cleanup() {}
 
 pub fn unsupported<T>() -> crate::io::Result<T> {
     Err(unsupported_err())
