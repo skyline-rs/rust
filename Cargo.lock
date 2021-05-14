@@ -1957,6 +1957,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "libc-nnsdk"
+version = "0.0.1"
+source = "git+https://github.com/ultimate-research/libc-nnsdk.git#82a83a6ebd519babb90b41bc9da4f564c367d54c"
+dependencies = [
+ "rustc-std-workspace-core",
+]
+
+[[package]]
 name = "libgit2-sys"
 version = "0.12.20+1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2386,7 +2394,7 @@ version = "0.1.0"
 source = "git+https://github.com/inspier/nnsdk-rs.git#9e0c1c2c28f1bf42f8595d030e61a6bf271d39c7"
 dependencies = [
  "compiler_builtins",
- "libc-nnsdk",
+ "libc-nnsdk 0.0.1 (git+https://github.com/inspier/libc-nnsdk.git)",
  "rustc-std-workspace-core",
 ]
 
@@ -2543,7 +2551,7 @@ dependencies = [
  "cfg-if 0.1.10",
  "compiler_builtins",
  "core",
- "libc-nnsdk",
+ "libc-nnsdk 0.0.1 (git+https://github.com/inspier/libc-nnsdk.git)",
 ]
 
 [[package]]
@@ -4966,7 +4974,7 @@ dependencies = [
  "hashbrown 0.11.2",
  "hermit-abi",
  "libc",
- "libc-nnsdk",
+ "libc-nnsdk 0.0.1 (git+https://github.com/ultimate-research/libc-nnsdk.git)",
  "miniz_oxide",
  "nnsdk",
  "object",
