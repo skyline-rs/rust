@@ -1,7 +1,7 @@
 use super::{LinkerFlavor, LldFlavor, PanicStrategy, RelroLevel, Target, TargetOptions};
 
 // skyline has custom linker requirements.
-const LINKER_SCRIPT: &str = include_str!("./aarch64_skyline_switch_linker_script.ld");
+//const LINKER_SCRIPT: &str = include_str!("./aarch64_skyline_switch_linker_script.ld");
 
 pub fn target() -> Target {
     let mut opts = TargetOptions {
@@ -19,7 +19,7 @@ pub fn target() -> Target {
         has_elf_tls: false,
         has_rpath: false,
         relro_level: RelroLevel::Off,
-        link_script: Some(LINKER_SCRIPT.to_string()),
+        //link_script: Some(LINKER_SCRIPT.to_string()),
         ..Default::default()
     };
 
