@@ -941,6 +941,8 @@ supported_targets! {
 
     ("bpfeb-unknown-none", bpfeb_unknown_none),
     ("bpfel-unknown-none", bpfel_unknown_none),
+
+    ("aarch64-skyline-switch", aarch64_skyline_switch),
 }
 
 /// Warnings encountered when parsing the target `json`.
