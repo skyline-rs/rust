@@ -689,7 +689,7 @@ linker = "fake-ld"
 #src-tarball = true
 
 # Whether to allow failures when building tools
-#missing-tools = false
+missing-tools = true
 
 # List of compression formats to use when generating dist tarballs. The list of
 # formats is provided to rust-installer, which must support all of them.
