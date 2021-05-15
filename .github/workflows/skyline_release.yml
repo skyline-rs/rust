@@ -39,7 +39,7 @@ jobs:
     - name: Build MacOS
       if: matrix.os == 'macOS-latest'
       run: |
-        ls $(brew --prefix llvm)/bin/
+        echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
         ld.lld --help
         echo "~/.cargo/bin" >> $GITHUB_PATH
         bash build_skyline_mac.sh
