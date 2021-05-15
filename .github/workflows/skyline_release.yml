@@ -39,6 +39,8 @@ jobs:
     - name: Build MacOS
       if: matrix.os == 'macOS-latest'
       run: |
+        ls $(brew --prefix llvm)/bin/
+        ld.lld --help
         echo "~/.cargo/bin" >> $GITHUB_PATH
         bash build_skyline_mac.sh
         echo "target_triple=x86_64-apple-darwin" >> $GITHUB_ENV
