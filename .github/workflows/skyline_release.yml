@@ -1,0 +1,49 @@
+name: Rust
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, macOS-latest, ubuntu-latest]
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Cache Build Artifacts
+      uses: actions/cache@v2
+      with:
+        path: build
+        key: ${{ runner.os }}-build-artifacts
+    - name: Build Linux
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        bash build_skyline.sh
+        echo "target_triple=x86_64-unknown-linux-gnu" >> $GITHUB_ENV
+    - name: Build Windows
+      if: matrix.os == 'windows-latest'
+      run: |
+        bash build_skyline_win.sh
+        echo "target_triple=x86_64-pc-windows-gnu" >> $GITHUB_ENV
+    - name: Build MacOS
+      if: matrix.os == 'macOS-latest'
+      run: |
+        bash build_skyline_mac.sh
+        echo "target_triple=x86_64-apple-darwin" >> $GITHUB_ENV
+    - name: Package Release
+      uses: vimtor/action-zip@v1
+      with:
+        files: build/${{ env.target_triple }}/stage2
+        dest: build-${{ env.target_triple }}.zip
+    - uses: actions/upload-artifact@v2
+      with:
+        name: build-${{ env.target_triple }}.zip
+        path: build-${{ env.target_triple }}.zip
