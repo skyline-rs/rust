@@ -27,6 +27,7 @@ jobs:
     - name: Build Linux
       if: matrix.os == 'ubuntu-latest'
       run: |
+        apt install binutils
         bash build_skyline.sh
         echo "target_triple=x86_64-unknown-linux-gnu" >> $GITHUB_ENV
     - name: Build Windows
