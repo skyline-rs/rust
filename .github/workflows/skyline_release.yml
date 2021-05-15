@@ -32,7 +32,7 @@ jobs:
     - name: Build Windows
       if: matrix.os == 'windows-latest'
       run: |
-        choco install mingw
+        where gcc
         bash build_skyline_win.sh
         echo "target_triple=x86_64-pc-windows-gnu" >> $GITHUB_ENV
     - name: Build MacOS
