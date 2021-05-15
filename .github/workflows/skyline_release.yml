@@ -19,6 +19,8 @@ jobs:
     steps:
     - uses: actions/checkout@v2
     - uses: seanmiddleditch/gha-setup-ninja@master
+    - name: Install fake-ld
+      run: cargo install --git https://github.com/skyline-rs/fake-ld
     - name: Cache Build Artifacts
       uses: actions/cache@v2
       with:
