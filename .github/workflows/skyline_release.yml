@@ -33,6 +33,8 @@ jobs:
       if: matrix.os == 'windows-latest'
       run: |
         where gcc
+        whereis gcc
+        exit 1
         bash build_skyline_win.sh
         echo "target_triple=x86_64-pc-windows-gnu" >> $GITHUB_ENV
     - name: Build MacOS
