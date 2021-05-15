@@ -604,7 +604,7 @@ use-lld = false
 # what platform is crossing to what platform.
 # Setting this will override the `use-lld` option for Rust code when targeting MSVC.
 #linker = "cc" (path)
-linker = "cc"
+linker = "gcc"
 
 # Path to the `llvm-config` binary of the installation of a custom LLVM to link
 # against. Note that if this is specified we don't compile LLVM at all for this
