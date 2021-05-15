@@ -528,7 +528,7 @@ lld = true
 # LLD will not be used if we're cross linking.
 #
 # Explicitly setting the linker for a target will override this option when targeting MSVC.
-use-lld = true
+use-lld = false
 
 # Indicates whether some LLVM tools, like llvm-objdump, will be made available in the
 # sysroot.
