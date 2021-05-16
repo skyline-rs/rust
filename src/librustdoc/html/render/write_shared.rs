@@ -225,6 +225,8 @@ pub(super) fn write_shared(
     )?;
     write_minify("search.js", static_files::SEARCH_JS)?;
     write_minify("settings.js", static_files::SETTINGS_JS)?;
+    write_minify("sidebar-items.js", static_files::sidebar::ITEMS)?;
+
     if cx.shared.include_sources {
         write_minify("source-script.js", static_files::sidebar::SOURCE_SCRIPT)?;
     }
@@ -465,8 +467,6 @@ pub(super) fn write_shared(
     // Update the list of all implementors for traits
     let dst = cx.dst.join("implementors");
     for (&did, imps) in &cx.cache.implementors {
-        let did = did.expect_real();
-
         // Private modules can leak through to this phase of rustdoc, which
         // could contain implementations for otherwise private types. In some
         // rare cases we could find an implementation for an item which wasn't
