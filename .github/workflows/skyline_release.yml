@@ -29,8 +29,6 @@ jobs:
     - name: Build Linux
       if: matrix.os == 'ubuntu-latest'
       run: |
-        ls /usr/bin
-        whereis ld.lld
         fake-ld --help
         bash build_skyline.sh
         echo "target_triple=x86_64-unknown-linux-gnu" >> $GITHUB_ENV
