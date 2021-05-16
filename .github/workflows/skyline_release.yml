@@ -48,10 +48,8 @@ jobs:
         bash build_skyline_mac.sh
         echo "target_triple=x86_64-apple-darwin" >> $GITHUB_ENV
     - name: Package Release
-      uses: vimtor/action-zip@v1
-      with:
-        files: build/${{ env.target_triple }}/stage2
-        dest: build-${{ env.target_triple }}.zip
+      run: |
+        rust-zip build/${{ env.target_triple }}/stage2 build-${{ env.target_triple }}.zip
     - uses: actions/upload-artifact@v2
       with:
         name: build-${{ env.target_triple }}.zip
