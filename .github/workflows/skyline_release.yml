@@ -20,6 +20,7 @@ jobs:
     - uses: actions/checkout@v2
     - uses: seanmiddleditch/gha-setup-ninja@master
     - name: Install fake-ld
+      if: matrix.os != 'windows-latest'
       run: cargo install --git https://github.com/skyline-rs/fake-ld
     - name: Cache Build Artifacts
       uses: actions/cache@v2
@@ -29,24 +30,18 @@ jobs:
     - name: Build Linux
       if: matrix.os == 'ubuntu-latest'
       run: |
-        fake-ld --help
         bash build_skyline.sh
         echo "target_triple=x86_64-unknown-linux-gnu" >> $GITHUB_ENV
     - name: Build Windows
       if: matrix.os == 'windows-latest'
       run: |
-        where.exe gcc
-        exit 1
+        cargo install --git https://github.com/skyline-rs/fake-ld --features=fake-gcc
         choco install llvm
-        ls "C:/Program Files/LLVM/bin"
-        fake-ld --help
         bash build_skyline_win.sh
         echo "target_triple=x86_64-pc-windows-gnu" >> $GITHUB_ENV
     - name: Build MacOS
       if: matrix.os == 'macOS-latest'
       run: |
-        fake-ld --help
-        echo "~/.cargo/bin" >> $GITHUB_PATH
         bash build_skyline_mac.sh
         echo "target_triple=x86_64-apple-darwin" >> $GITHUB_ENV
     - name: Package Release
