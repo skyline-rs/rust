@@ -6,6 +6,10 @@ use crate::path::Path;
 use crate::sys::pipe::AnonPipe;
 use crate::sys::{unsupported, Void};
 use crate::sys_common::process::{CommandEnv, CommandEnvs};
+use crate::os::raw::NonZero_c_int;
+use crate::num::NonZeroI32;
+use crate::convert::TryInto;
+use crate::os::raw::c_int;
 
 pub use crate::ffi::OsString as EnvKey;
 
@@ -107,6 +111,20 @@ impl ExitStatus {
     pub fn code(&self) -> Option<i32> {
         match self.0 {}
     }
+
+    #[allow(unreachable_code)]
+    pub fn exit_ok(&self) -> Result<(), ExitStatusError> {
+        // This assumes that WIFEXITED(status) && WEXITSTATUS==0 corresponds to status==0.  This is
+        // true on all actual versios of Unix, is widely assumed, and is specified in SuS
+        // https://pubs.opengroup.org/onlinepubs/9699919799/functions/wait.html .  If it is not
+        // true for a platform pretending to be Unix, the tests (our doctests, and also
+        // procsss_unix/tests.rs) will spot it.  `ExitStatusError::code` assumes this too.
+        //match NonZero_c_int::try_from(unreachable!()) {
+        //    /* was nonzero */ Ok(failure) => Err(ExitStatusError(failure)),
+        //    /* was zero, couldn't convert */ Err(_) => Ok(()),
+        //}
+        unreachable!()
+    }
 }
 
 impl Clone for ExitStatus {
@@ -134,6 +152,31 @@ impl fmt::Debug for ExitStatus {
 impl fmt::Display for ExitStatus {
     fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {}
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub struct ExitStatusError(NonZero_c_int);
+
+impl From<ExitStatusError> for ExitStatus {
+    #[allow(unreachable_code)]
+    fn from(_: ExitStatusError) -> ExitStatus {
+        ExitStatus(panic!("Exit status conversion not possible on switch"))
+    }
+}
+
+/// Converts a raw `c_int` to a type-safe `ExitStatus` by wrapping it without copying.
+impl From<c_int> for ExitStatus {
+    #[allow(unreachable_code)]
+    fn from(_: c_int) -> ExitStatus {
+        ExitStatus(unreachable!())
+    }
+}
+
+impl ExitStatusError {
+    pub fn code(self) -> Option<NonZeroI32> {
+        Some(1.try_into().unwrap())
+        //ExitStatus(self.0.into()).code().map(|st| st.try_into().unwrap())
     }
 }
 
