@@ -60,13 +60,16 @@ jobs:
       - uses: actions/download-artifact@v2
         with:
           name: build-x86_64-unknown-linux-gnu.zip
-          path: build-x86_64-unknown-linux-gnu.zip
+          path: build-x86_64-unknown-linux-gnu
       - uses: actions/download-artifact@v2
         with:
           name: build-x86_64-apple-darwin.zip
-          path: build-x86_64-apple-darwin.zip
+          path: build-x86_64-apple-darwin
       - name: Listing
-        run: ls
+        run: |
+          ls -l
+          ls -lh build-x86_64-unknown-linux-gnu
+          ls -lh build-x86_64-apple-darwin
       - name: Create Release
         id: create_release
         uses: actions/create-release@v1
@@ -84,7 +87,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: build-x86_64-unknown-linux-gnu.zip
+          asset_path: build-x86_64-unknown-linux-gnu/build-x86_64-unknown-linux-gnu.zip
           asset_name: build-x86_64-unknown-linux-gnu.zip
           asset_content_type: application/octet-stream
       - name: Upload MacOS Build
@@ -94,6 +97,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: build-x86_64-apple-darwin.zip
+          asset_path: build-x86_64-apple-darwin/build-x86_64-apple-darwin.zip
           asset_name: build-x86_64-apple-darwin.zip
           asset_content_type: application/octet-stream
