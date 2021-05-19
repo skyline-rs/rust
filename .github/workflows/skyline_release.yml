@@ -57,3 +57,48 @@ jobs:
       with:
         name: build-${{ env.target_triple }}.zip
         path: build-${{ env.target_triple }}.zip
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    name: Upload Release
+    steps:
+      - uses: actions/download-artifact@v2
+        with:
+          name: build-x86_64-unknown-linux-gnu.zip
+          path: build-x86_64-unknown-linux-gnu.zip
+      - uses: actions/download-artifact@v2
+        with:
+          name: build-x86_64-apple-darwin.zip
+          path: build-x86_64-apple-darwin.zip
+      - name: Listing
+        run: ls
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.sha }}
+          release_name: Release ${{ github.sha }}
+          draft: false
+          prerelease: false
+      - name: Upload Linux Build
+        id: upload-linux
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: build-x86_64-unknown-linux-gnu.zip
+          asset_name: build-x86_64-unknown-linux-gnu.zip
+          asset_content_type: application/octet-stream
+      - name: Upload MacOS Build
+        id: upload-macos
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: build-x86_64-apple-darwin.zip
+          asset_name: build-x86_64-apple-darwin.zip
+          asset_content_type: application/octet-stream
