@@ -243,7 +243,7 @@ fn default_hook(info: &PanicInfo<'_>) {
         #[cfg(target = "aarch64-skyline-switch")]
         show_error(
             69,
-            "Skyline plugin has panicked! Please open the details and send a screenshot to the developer, then close the game.\n",
+            "Skyline plugin has panicked! Please open the details then send a screenshot of the message to the developer, then close the game.\0",
             err_msg.as_str(),
         );
 
