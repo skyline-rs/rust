@@ -31,7 +31,7 @@ jobs:
     - name: Build Linux
       if: matrix.os == 'ubuntu-latest'
       run: |
-        snap install zig --classic --beta
+        sudo snap install zig --classic --beta
         bash build_skyline.sh
         echo "target_triple=x86_64-unknown-linux-gnu" >> $GITHUB_ENV
     - name: Build Windows
