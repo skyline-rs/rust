@@ -33,11 +33,12 @@ jobs:
         echo "target_triple=x86_64-unknown-linux-gnu" >> $GITHUB_ENV
     - name: Build Windows
       if: matrix.os == 'windows-latest'
+      shell: cmd
       run: |
         cargo install --git https://github.com/skyline-rs/fake-ld --features=fake-gcc
         choco install llvm zig
         bash build_skyline_win.sh
-        echo "target_triple=x86_64-pc-windows-msvc" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf-8 -Append
+        echo "target_triple=x86_64-pc-windows-msvc" >> $GITHUB_ENV
         rmdir /s /q build/x86_64-pc-windows-msvc/stage1
     - name: Build MacOS
       if: matrix.os == 'macOS-latest'
