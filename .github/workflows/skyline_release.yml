@@ -25,14 +25,10 @@ jobs:
       with:
         path: build
         key: ${{ runner.os }}-build-artifacts
-    - name: Install OpenSSL (Linux)
-      if: matrix.os == 'ubuntu-latest'
-      run: sudo apt-get install libssl-dev
     - name: Build Linux
       if: matrix.os == 'ubuntu-latest'
       run: |
-        cargo install --git https://github.com/skyline-rs/fake-ld
-        sudo snap install zig --classic --beta
+        cargo install --git https://github.com/skyline-rs/fake-ld --features=gcc-forwarder
         bash build_skyline.sh
         echo "target_triple=x86_64-unknown-linux-gnu" >> $GITHUB_ENV
     - name: Build Windows
