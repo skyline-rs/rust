@@ -37,9 +37,9 @@ jobs:
       if: matrix.os == 'windows-latest'
       run: |
         cargo install --git https://github.com/skyline-rs/fake-ld --features=fake-gcc
-        choco install llvm
+        choco install llvm zig
         bash build_skyline_win.sh
-        echo "target_triple=x86_64-pc-windows-gnu" >> $GITHUB_ENV
+        echo "target_triple=x86_64-pc-windows-msvc" >> $GITHUB_ENV
     - name: Build MacOS
       if: matrix.os == 'macOS-latest'
       run: |
