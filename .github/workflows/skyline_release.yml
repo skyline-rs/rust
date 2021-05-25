@@ -42,7 +42,7 @@ jobs:
         choco install llvm zig
         bash build_skyline_win.sh
         echo "target_triple=x86_64-pc-windows-msvc" >> $GITHUB_ENV
-        rm -r build/x86_64-pc-windows-msvc/stage1 build/x86_64-pc-windows-msvc/stage1-rustc build/x86_64-pc-windows-msvc/stage1-std build/x86_64-pc-windows-msvc/stage1-tools build/x86_64-pc-windows-msvc/stage0
+        rm -r build/x86_64-pc-windows-msvc/stage1 build/x86_64-pc-windows-msvc/stage1-rustc build/x86_64-pc-windows-msvc/stage1-std build/x86_64-pc-windows-msvc/stage1-tools build/x86_64-pc-windows-msvc/stage2-tools build/x86_64-pc-windows-msvc/stage0
     - name: Build MacOS
       if: matrix.os == 'macOS-latest'
       run: |
@@ -56,6 +56,9 @@ jobs:
       with:
         name: build-${{ env.target_triple }}.zip
         path: build-${{ env.target_triple }}.zip
+    - name: Delete Windows Leftovers
+      if: matrix.os == 'windows-latest'
+      run: rm -rf build build-x86_64-pc-windows-msvc.zip
   release:
     runs-on: ubuntu-latest
     needs: build
