@@ -57,8 +57,9 @@ jobs:
         name: build-${{ env.target_triple }}.zip
         path: build-${{ env.target_triple }}.zip
     - name: Delete Windows Leftovers
+      shell: bash
       if: matrix.os == 'windows-latest'
-      run: rm -rf build build-x86_64-pc-windows-msvc.zip
+      run: rm -r build build-x86_64-pc-windows-msvc.zip
   release:
     runs-on: ubuntu-latest
     needs: build
