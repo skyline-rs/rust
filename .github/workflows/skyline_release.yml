@@ -82,7 +82,7 @@ jobs:
           ls -l
           ls -lh build-x86_64-unknown-linux-gnu
           ls -lh build-x86_64-apple-darwin
-          ls -lh x86_64-pc-windows-msvc
+          ls -lh build-x86_64-pc-windows-msvc
       - name: Create Release
         id: create_release
         uses: actions/create-release@v1
