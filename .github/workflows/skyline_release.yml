@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macOS-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest] # , macOS-latest
 
     steps:
     - uses: actions/checkout@v2
@@ -69,20 +69,14 @@ jobs:
         with:
           name: build-x86_64-unknown-linux-gnu.zip
           path: build-x86_64-unknown-linux-gnu
-      - uses: actions/download-artifact@v2
-        with:
-          name: build-x86_64-apple-darwin.zip
-          path: build-x86_64-apple-darwin
+      #- uses: actions/download-artifact@v2
+      #  with:
+      #    name: build-x86_64-apple-darwin.zip
+      #    path: build-x86_64-apple-darwin
       - uses: actions/download-artifact@v2
         with:
           name: build-x86_64-pc-windows-msvc.zip
           path: build-x86_64-pc-windows-msvc
-      - name: Listing
-        run: |
-          ls -l
-          ls -lh build-x86_64-unknown-linux-gnu
-          ls -lh build-x86_64-apple-darwin
-          ls -lh build-x86_64-pc-windows-msvc
       - name: Create Release
         id: create_release
         uses: actions/create-release@v1
@@ -113,13 +107,13 @@ jobs:
           asset_path: build-x86_64-pc-windows-msvc/build-x86_64-pc-windows-msvc.zip
           asset_name: build-x86_64-pc-windows-msvc.zip
           asset_content_type: application/octet-stream
-      - name: Upload MacOS Build
-        id: upload-macos
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: build-x86_64-apple-darwin/build-x86_64-apple-darwin.zip
-          asset_name: build-x86_64-apple-darwin.zip
-          asset_content_type: application/octet-stream
+      #- name: Upload MacOS Build
+      #  id: upload-macos
+      #  uses: actions/upload-release-asset@v1
+      #  env:
+      #    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      #  with:
+      #    upload_url: ${{ steps.create_release.outputs.upload_url }}
+      #    asset_path: build-x86_64-apple-darwin/build-x86_64-apple-darwin.zip
+      #    asset_name: build-x86_64-apple-darwin.zip
+      #    asset_content_type: application/octet-stream
