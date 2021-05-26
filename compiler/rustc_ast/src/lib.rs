@@ -10,15 +10,13 @@
 )]
 #![feature(box_syntax)]
 #![feature(box_patterns)]
-#![cfg_attr(bootstrap, feature(const_fn))] // For the `transmute` in `P::new`
-#![cfg_attr(not(bootstrap), feature(const_fn_unsize))] // For the `transmute` in `P::new`
+#![cfg_attr(bootstrap, feature(const_fn_unsize))]
 #![feature(const_fn_transmute)]
 #![feature(const_panic)]
 #![feature(crate_visibility_modifier)]
 #![feature(iter_zip)]
 #![feature(label_break_value)]
 #![feature(nll)]
-#![cfg_attr(bootstrap, feature(or_patterns))]
 #![recursion_limit = "256"]
 
 #[macro_use]

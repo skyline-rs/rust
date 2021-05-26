@@ -13,6 +13,7 @@ use crate::middle::resolve_lifetime::{self, LifetimeScopeForPath, ObjectLifetime
 use crate::middle::stability;
 use crate::mir::interpret::{self, Allocation, ConstValue, Scalar};
 use crate::mir::{Body, Field, Local, Place, PlaceElem, ProjectionKind, Promoted};
+use crate::thir::Thir;
 use crate::traits;
 use crate::ty::query::{self, OnDiskCache, TyCtxtAt};
 use crate::ty::subst::{GenericArg, GenericArgKind, InternalSubsts, Subst, SubstsRef, UserSubsts};
@@ -1041,6 +1042,10 @@ impl<'tcx> TyCtxt<'tcx> {
         }
     }
 
+    pub fn alloc_steal_thir(self, thir: Thir<'tcx>) -> &'tcx Steal<Thir<'tcx>> {
+        self.arena.alloc(Steal::new(thir))
+    }
+
     pub fn alloc_steal_mir(self, mir: Body<'tcx>) -> &'tcx Steal<Body<'tcx>> {
         self.arena.alloc(Steal::new(mir))
     }
@@ -1072,7 +1077,7 @@ impl<'tcx> TyCtxt<'tcx> {
     /// Allocates a read-only byte or string literal for `mir::interpret`.
     pub fn allocate_bytes(self, bytes: &[u8]) -> interpret::AllocId {
         // Create an allocation that just contains these bytes.
-        let alloc = interpret::Allocation::from_byte_aligned_bytes(bytes);
+        let alloc = interpret::Allocation::from_bytes_byte_aligned_immutable(bytes);
         let alloc = self.intern_const_alloc(alloc);
         self.create_memory_alloc(alloc)
     }

@@ -267,7 +267,7 @@ extended = true
 # Installs chosen set of extended tools if `extended = true`. By default builds all.
 # If chosen tool failed to build the installation fails. If `extended = false`, this
 # option is ignored.
-tools = ["cargo", "clippy", "analysis", "src", "rustdoc"] #"rustfmt", "rls"
+tools = ["clippy", "analysis", "src", "rustdoc"] #"cargo", "rustfmt", "rls"
 
 # Verbosity level: 0 == not verbose, 1 == verbose, 2 == very verbose
 #verbose = 0

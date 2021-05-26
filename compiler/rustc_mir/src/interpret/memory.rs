@@ -219,9 +219,11 @@ impl<'mir, 'tcx, M: Machine<'mir, 'tcx>> Memory<'mir, 'tcx, M> {
     pub fn allocate_bytes(
         &mut self,
         bytes: &[u8],
+        align: Align,
         kind: MemoryKind<M::MemoryKind>,
+        mutability: Mutability,
     ) -> Pointer<M::PointerTag> {
-        let alloc = Allocation::from_byte_aligned_bytes(bytes);
+        let alloc = Allocation::from_bytes(bytes, align, mutability);
         self.allocate_with(alloc, kind)
     }
 
@@ -321,6 +323,9 @@ impl<'mir, 'tcx, M: Machine<'mir, 'tcx>> Memory<'mir, 'tcx, M> {
             }
         };
 
+        if alloc.mutability == Mutability::Not {
+            throw_ub_format!("deallocating immutable allocation {}", ptr.alloc_id);
+        }
         if alloc_kind != kind {
             throw_ub_format!(
                 "deallocating {}, which is {} memory, using {} deallocation operation",
@@ -343,10 +348,11 @@ impl<'mir, 'tcx, M: Machine<'mir, 'tcx>> Memory<'mir, 'tcx, M> {
         }
 
         // Let the machine take some extra action
-        M::memory_deallocated(&mut self.extra, &mut alloc, ptr)?;
+        let size = alloc.size();
+        M::memory_deallocated(&mut self.extra, &mut alloc.extra, ptr, size)?;
 
         // Don't forget to remember size and align of this now-dead allocation
-        let old = self.dead_alloc_map.insert(ptr.alloc_id, (alloc.size(), alloc.align));
+        let old = self.dead_alloc_map.insert(ptr.alloc_id, (size, alloc.align));
         if old.is_some() {
             bug!("Nothing can be deallocated twice");
         }
@@ -591,7 +597,7 @@ impl<'mir, 'tcx, M: Machine<'mir, 'tcx>> Memory<'mir, 'tcx, M> {
             },
         )?;
         if let Some((ptr, alloc)) = ptr_and_alloc {
-            M::memory_read(&self.extra, alloc, ptr, size)?;
+            M::memory_read(&self.extra, &alloc.extra, ptr, size)?;
             let range = alloc_range(ptr.offset, size);
             Ok(Some(AllocRef { alloc, range, tcx: self.tcx, alloc_id: ptr.alloc_id }))
         } else {
@@ -624,9 +630,6 @@ impl<'mir, 'tcx, M: Machine<'mir, 'tcx>> Memory<'mir, 'tcx, M> {
             // Need to make a copy, even if `get_global_alloc` is able
             // to give us a cheap reference.
             let alloc = Self::get_global_alloc(memory_extra, tcx, id, /*is_write*/ true)?;
-            if alloc.mutability == Mutability::Not {
-                throw_ub!(WriteToReadOnly(id))
-            }
             let kind = M::GLOBAL_KIND.expect(
                 "I got a global allocation that I have to copy but the machine does \
                     not expect that to happen",
@@ -660,7 +663,7 @@ impl<'mir, 'tcx, M: Machine<'mir, 'tcx>> Memory<'mir, 'tcx, M> {
             // FIXME: can we somehow avoid looking up the allocation twice here?
             // We cannot call `get_raw_mut` inside `check_and_deref_ptr` as that would duplicate `&mut self`.
             let (alloc, extra) = self.get_raw_mut(ptr.alloc_id)?;
-            M::memory_written(extra, alloc, ptr, size)?;
+            M::memory_written(extra, &mut alloc.extra, ptr, size)?;
             let range = alloc_range(ptr.offset, size);
             Ok(Some(AllocRefMut { alloc, range, tcx, alloc_id: ptr.alloc_id }))
         } else {
@@ -672,8 +675,9 @@ impl<'mir, 'tcx, M: Machine<'mir, 'tcx>> Memory<'mir, 'tcx, M> {
     pub fn get_alloc_extra_mut<'a>(
         &'a mut self,
         id: AllocId,
-    ) -> InterpResult<'tcx, &'a mut M::AllocExtra> {
-        Ok(&mut self.get_raw_mut(id)?.0.extra)
+    ) -> InterpResult<'tcx, (&'a mut M::AllocExtra, &'a mut M::MemoryExtra)> {
+        let (alloc, memory_extra) = self.get_raw_mut(id)?;
+        Ok((&mut alloc.extra, memory_extra))
     }
 
     /// Obtain the size and alignment of an allocation, even if that allocation has
@@ -1029,7 +1033,7 @@ impl<'mir, 'tcx, M: Machine<'mir, 'tcx>> Memory<'mir, 'tcx, M> {
             Some(src_ptr) => src_ptr,
         };
         let src_alloc = self.get_raw(src.alloc_id)?;
-        M::memory_read(&self.extra, src_alloc, src, size)?;
+        M::memory_read(&self.extra, &src_alloc.extra, src, size)?;
         // We need the `dest` ptr for the next operation, so we get it now.
         // We already did the source checks and called the hooks so we are good to return early.
         let dest = match dest {
@@ -1058,7 +1062,7 @@ impl<'mir, 'tcx, M: Machine<'mir, 'tcx>> Memory<'mir, 'tcx, M> {
 
         // Destination alloc preparations and access hooks.
         let (dest_alloc, extra) = self.get_raw_mut(dest.alloc_id)?;
-        M::memory_written(extra, dest_alloc, dest, size * num_copies)?;
+        M::memory_written(extra, &mut dest_alloc.extra, dest, size * num_copies)?;
         let dest_bytes = dest_alloc
             .get_bytes_mut_ptr(&tcx, alloc_range(dest.offset, size * num_copies))
             .as_mut_ptr();

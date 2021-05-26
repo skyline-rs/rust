@@ -10,7 +10,6 @@
 #![feature(bool_to_option)]
 #![feature(iter_zip)]
 #![feature(once_cell)]
-#![cfg_attr(bootstrap, feature(or_patterns))]
 #![recursion_limit = "256"]
 
 #[macro_use]
@@ -31,4 +30,5 @@ pub fn provide(providers: &mut Providers) {
     providers.mir_built = build::mir_built;
     providers.thir_check_unsafety = check_unsafety::thir_check_unsafety;
     providers.thir_check_unsafety_for_const_arg = check_unsafety::thir_check_unsafety_for_const_arg;
+    providers.thir_body = thir::cx::thir_body;
 }

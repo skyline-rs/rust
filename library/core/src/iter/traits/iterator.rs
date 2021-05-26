@@ -92,8 +92,7 @@ fn _assert_is_object_safe(_: &dyn Iterator<Item = ()>) {}
     label = "`{Self}` is not an iterator",
     message = "`{Self}` is not an iterator"
 )]
-#[cfg_attr(bootstrap, doc(spotlight))]
-#[cfg_attr(not(bootstrap), doc(notable_trait))]
+#[doc(notable_trait)]
 #[rustc_diagnostic_item = "Iterator"]
 #[must_use = "iterators are lazy and do nothing unless consumed"]
 pub trait Iterator {
@@ -1848,6 +1847,12 @@ pub trait Iterator {
     /// Returns the number of `true` elements found.
     ///
     /// The relative order of partitioned items is not maintained.
+    ///
+    /// # Current implementation
+    /// Current algorithms tries finding the first element for which the predicate evaluates
+    /// to false, and the last element for which it evaluates to true and repeatedly swaps them.
+    ///
+    /// Time Complexity: *O*(*N*)
     ///
     /// See also [`is_partitioned()`] and [`partition()`].
     ///

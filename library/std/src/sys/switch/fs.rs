@@ -752,3 +752,5 @@ pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
         &mut crate::fs::File::create(to)?,
     )
 }
+
+pub use crate::sys_common::fs::try_exists;

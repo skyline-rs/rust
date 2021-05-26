@@ -644,9 +644,6 @@ declare_features! (
     /// Allows trait bounds in `const fn`.
     (active, const_fn_trait_bound, "1.53.0", Some(57563), None),
 
-    /// Allows unsizing coercions in `const fn`.
-    (active, const_fn_unsize, "1.53.0", Some(64992), None),
-
     /// Allows `async {}` expressions in const contexts.
     (active, const_async_blocks, "1.53.0", Some(85368), None),
 
@@ -697,11 +694,6 @@ pub const INCOMPLETE_FEATURES: &[Symbol] = &[
     sym::capture_disjoint_fields,
     sym::inherent_associated_types,
     sym::type_alias_impl_trait,
-    sym::native_link_modifiers,
-    sym::native_link_modifiers_bundle,
-    sym::native_link_modifiers_verbatim,
-    sym::native_link_modifiers_whole_archive,
-    sym::native_link_modifiers_as_needed,
     sym::rustc_insignificant_dtor,
     sym::unnamed_fields,
 ];

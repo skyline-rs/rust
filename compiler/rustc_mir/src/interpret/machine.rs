@@ -132,6 +132,11 @@ pub trait Machine<'mir, 'tcx>: Sized {
     /// Whether to enforce the validity invariant
     fn enforce_validity(ecx: &InterpCx<'mir, 'tcx, Self>) -> bool;
 
+    /// Whether function calls should be [ABI](Abi)-checked.
+    fn enforce_abi(_ecx: &InterpCx<'mir, 'tcx, Self>) -> bool {
+        true
+    }
+
     /// Entry point for obtaining the MIR of anything that should get evaluated.
     /// So not just functions and shims, but also const/static initializers, anonymous
     /// constants, ...
@@ -313,7 +318,7 @@ pub trait Machine<'mir, 'tcx>: Sized {
     #[inline(always)]
     fn memory_read(
         _memory_extra: &Self::MemoryExtra,
-        _alloc: &Allocation<Self::PointerTag, Self::AllocExtra>,
+        _alloc_extra: &Self::AllocExtra,
         _ptr: Pointer<Self::PointerTag>,
         _size: Size,
     ) -> InterpResult<'tcx> {
@@ -324,7 +329,7 @@ pub trait Machine<'mir, 'tcx>: Sized {
     #[inline(always)]
     fn memory_written(
         _memory_extra: &mut Self::MemoryExtra,
-        _alloc: &mut Allocation<Self::PointerTag, Self::AllocExtra>,
+        _alloc_extra: &mut Self::AllocExtra,
         _ptr: Pointer<Self::PointerTag>,
         _size: Size,
     ) -> InterpResult<'tcx> {
@@ -335,8 +340,9 @@ pub trait Machine<'mir, 'tcx>: Sized {
     #[inline(always)]
     fn memory_deallocated(
         _memory_extra: &mut Self::MemoryExtra,
-        _alloc: &mut Allocation<Self::PointerTag, Self::AllocExtra>,
+        _alloc_extra: &mut Self::AllocExtra,
         _ptr: Pointer<Self::PointerTag>,
+        _size: Size,
     ) -> InterpResult<'tcx> {
         Ok(())
     }
