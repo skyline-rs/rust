@@ -26,40 +26,6 @@ fn _assert_is_object_safe(_: &dyn Iterator<Item = ()>) {}
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_on_unimplemented(
     on(
-        _Self = "[std::ops::Range<Idx>; 1]",
-        label = "if you meant to iterate between two values, remove the square brackets",
-        note = "`[start..end]` is an array of one `Range`; you might have meant to have a `Range` \
-                without the brackets: `start..end`"
-    ),
-    on(
-        _Self = "[std::ops::RangeFrom<Idx>; 1]",
-        label = "if you meant to iterate from a value onwards, remove the square brackets",
-        note = "`[start..]` is an array of one `RangeFrom`; you might have meant to have a \
-              `RangeFrom` without the brackets: `start..`, keeping in mind that iterating over an \
-              unbounded iterator will run forever unless you `break` or `return` from within the \
-              loop"
-    ),
-    on(
-        _Self = "[std::ops::RangeTo<Idx>; 1]",
-        label = "if you meant to iterate until a value, remove the square brackets and add a \
-                 starting value",
-        note = "`[..end]` is an array of one `RangeTo`; you might have meant to have a bounded \
-                `Range` without the brackets: `0..end`"
-    ),
-    on(
-        _Self = "[std::ops::RangeInclusive<Idx>; 1]",
-        label = "if you meant to iterate between two values, remove the square brackets",
-        note = "`[start..=end]` is an array of one `RangeInclusive`; you might have meant to have a \
-              `RangeInclusive` without the brackets: `start..=end`"
-    ),
-    on(
-        _Self = "[std::ops::RangeToInclusive<Idx>; 1]",
-        label = "if you meant to iterate until a value (including it), remove the square brackets \
-                 and add a starting value",
-        note = "`[..=end]` is an array of one `RangeToInclusive`; you might have meant to have a \
-                bounded `RangeInclusive` without the brackets: `0..=end`"
-    ),
-    on(
         _Self = "std::ops::RangeTo<Idx>",
         label = "if you meant to iterate until a value, add a starting value",
         note = "`..end` is a `RangeTo`, which cannot be iterated on; you might have meant to have a \
@@ -2602,6 +2568,18 @@ pub trait Iterator {
     /// If several elements are equally maximum, the last element is
     /// returned. If the iterator is empty, [`None`] is returned.
     ///
+    /// Note that [`f32`]/[`f64`] doesn't implement [`Ord`] due to NaN being
+    /// incomparable. You can work around this by using [`Iterator::reduce`]:
+    /// ```
+    /// assert_eq!(
+    ///     vec![2.4, f32::NAN, 1.3]
+    ///         .into_iter()
+    ///         .reduce(f32::max)
+    ///         .unwrap(),
+    ///     2.4
+    /// );
+    /// ```
+    ///
     /// # Examples
     ///
     /// Basic usage:
@@ -2625,8 +2603,20 @@ pub trait Iterator {
 
     /// Returns the minimum element of an iterator.
     ///
-    /// If several elements are equally minimum, the first element is
-    /// returned. If the iterator is empty, [`None`] is returned.
+    /// If several elements are equally minimum, the first element is returned.
+    /// If the iterator is empty, [`None`] is returned.
+    ///
+    /// Note that [`f32`]/[`f64`] doesn't implement [`Ord`] due to NaN being
+    /// incomparable. You can work around this by using [`Iterator::reduce`]:
+    /// ```
+    /// assert_eq!(
+    ///     vec![2.4, f32::NAN, 1.3]
+    ///         .into_iter()
+    ///         .reduce(f32::min)
+    ///         .unwrap(),
+    ///     1.3
+    /// );
+    /// ```
     ///
     /// # Examples
     ///
