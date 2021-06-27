@@ -57,12 +57,7 @@ pub use nonzero::{NonZeroI128, NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI8, No
 #[stable(feature = "try_from", since = "1.34.0")]
 pub use error::TryFromIntError;
 
-#[unstable(
-    feature = "int_error_matching",
-    reason = "it can be useful to match errors when making error messages \
-              for integer parsing",
-    issue = "22639"
-)]
+#[stable(feature = "int_error_matching", since = "1.55.0")]
 pub use error::IntErrorKind;
 
 macro_rules! usize_isize_to_xe_bytes_doc {
@@ -595,8 +590,8 @@ impl u8 {
     /// before using this function.
     ///
     /// [infra-aw]: https://infra.spec.whatwg.org/#ascii-whitespace
-    /// [pct]: http://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap07.html#tag_07_03_01
-    /// [bfs]: http://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_06_05
+    /// [pct]: https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap07.html#tag_07_03_01
+    /// [bfs]: https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_06_05
     ///
     /// # Examples
     ///

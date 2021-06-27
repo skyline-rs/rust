@@ -13,6 +13,7 @@ use libc::{c_void, size_t, wchar_t};
 pub use self::EXCEPTION_DISPOSITION::*;
 pub use self::FILE_INFO_BY_HANDLE_CLASS::*;
 
+pub type DWORD_PTR = ULONG_PTR;
 pub type DWORD = c_ulong;
 pub type NonZeroDWORD = NonZero_c_ulong;
 pub type HANDLE = LPVOID;
@@ -53,6 +54,7 @@ pub type LPWSADATA = *mut WSADATA;
 pub type LPWSAPROTOCOL_INFO = *mut WSAPROTOCOL_INFO;
 pub type LPWSTR = *mut WCHAR;
 pub type LPFILETIME = *mut FILETIME;
+pub type LPSYSTEM_INFO = *mut SYSTEM_INFO;
 pub type LPWSABUF = *mut WSABUF;
 pub type LPWSAOVERLAPPED = *mut c_void;
 pub type LPWSAOVERLAPPED_COMPLETION_ROUTINE = *mut c_void;
@@ -234,6 +236,7 @@ pub const SD_RECEIVE: c_int = 0;
 pub const SD_SEND: c_int = 1;
 pub const SOCK_DGRAM: c_int = 2;
 pub const SOCK_STREAM: c_int = 1;
+pub const SOCKET_ERROR: c_int = -1;
 pub const SOL_SOCKET: c_int = 0xffff;
 pub const SO_RCVTIMEO: c_int = 0x1006;
 pub const SO_SNDTIMEO: c_int = 0x1005;
@@ -530,6 +533,21 @@ pub struct SOCKADDR {
 pub struct FILETIME {
     pub dwLowDateTime: DWORD,
     pub dwHighDateTime: DWORD,
+}
+
+#[repr(C)]
+pub struct SYSTEM_INFO {
+    pub wProcessorArchitecture: WORD,
+    pub wReserved: WORD,
+    pub dwPageSize: DWORD,
+    pub lpMinimumApplicationAddress: LPVOID,
+    pub lpMaximumApplicationAddress: LPVOID,
+    pub dwActiveProcessorMask: DWORD_PTR,
+    pub dwNumberOfProcessors: DWORD,
+    pub dwProcessorType: DWORD,
+    pub dwAllocationGranularity: DWORD,
+    pub wProcessorLevel: WORD,
+    pub wProcessorRevision: WORD,
 }
 
 #[repr(C)]
@@ -933,6 +951,7 @@ extern "system" {
     pub fn GetModuleHandleW(lpModuleName: LPCWSTR) -> HMODULE;
 
     pub fn GetSystemTimeAsFileTime(lpSystemTimeAsFileTime: LPFILETIME);
+    pub fn GetSystemInfo(lpSystemInfo: LPSYSTEM_INFO);
 
     pub fn CreateEventW(
         lpEventAttributes: LPSECURITY_ATTRIBUTES,

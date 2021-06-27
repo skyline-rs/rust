@@ -3,7 +3,7 @@
 //! manage the caches, and so forth.
 
 use super::queries;
-use rustc_middle::dep_graph::{DepKind, DepNode, DepNodeExt, DepNodeIndex, SerializedDepNodeIndex};
+use rustc_middle::dep_graph::{DepKind, DepNode, DepNodeIndex, SerializedDepNodeIndex};
 use rustc_middle::ty::query::on_disk_cache;
 use rustc_middle::ty::tls::{self, ImplicitCtxt};
 use rustc_middle::ty::{self, TyCtxt};
@@ -14,7 +14,7 @@ use rustc_data_structures::sync::Lock;
 use rustc_data_structures::thin_vec::ThinVec;
 use rustc_errors::Diagnostic;
 use rustc_serialize::opaque;
-use rustc_span::def_id::{DefId, LocalDefId};
+use rustc_span::def_id::LocalDefId;
 
 #[derive(Copy, Clone)]
 pub struct QueryCtxt<'tcx> {
@@ -25,6 +25,7 @@ pub struct QueryCtxt<'tcx> {
 impl<'tcx> std::ops::Deref for QueryCtxt<'tcx> {
     type Target = TyCtxt<'tcx>;
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.tcx
     }
@@ -42,10 +43,6 @@ impl HasDepContext for QueryCtxt<'tcx> {
 }
 
 impl QueryContext for QueryCtxt<'tcx> {
-    fn def_path_str(&self, def_id: DefId) -> String {
-        self.tcx.def_path_str(def_id)
-    }
-
     fn current_query_job(&self) -> Option<QueryJobId<Self::DepKind>> {
         tls::with_related_context(**self, |icx| icx.query)
     }
@@ -60,39 +57,6 @@ impl QueryContext for QueryCtxt<'tcx> {
     }
 
     fn try_force_from_dep_node(&self, dep_node: &DepNode) -> bool {
-        // FIXME: This match is just a workaround for incremental bugs and should
-        // be removed. https://github.com/rust-lang/rust/issues/62649 is one such
-        // bug that must be fixed before removing this.
-        match dep_node.kind {
-            DepKind::hir_owner | DepKind::hir_owner_nodes => {
-                if let Some(def_id) = dep_node.extract_def_id(**self) {
-                    let def_id = def_id.expect_local();
-                    let hir_id = self.tcx.hir().local_def_id_to_hir_id(def_id);
-                    if def_id != hir_id.owner {
-                        // This `DefPath` does not have a
-                        // corresponding `DepNode` (e.g. a
-                        // struct field), and the ` DefPath`
-                        // collided with the `DefPath` of a
-                        // proper item that existed in the
-                        // previous compilation session.
-                        //
-                        // Since the given `DefPath` does not
-                        // denote the item that previously
-                        // existed, we just fail to mark green.
-                        return false;
-                    }
-                } else {
-                    // If the node does not exist anymore, we
-                    // just fail to mark green.
-                    return false;
-                }
-            }
-            _ => {
-                // For other kinds of nodes it's OK to be
-                // forced.
-            }
-        }
-
         debug!("try_force_from_dep_node({:?}) --- trying to force", dep_node);
 
         // We must avoid ever having to call `force_from_dep_node()` for a
@@ -389,14 +353,14 @@ macro_rules! define_queries {
             }
 
             #[inline]
-            fn compute(tcx: QueryCtxt<'tcx>, key: Self::Key) -> Self::Value {
-                let is_local = key.query_crate() == LOCAL_CRATE;
-                let provider = if is_local {
+            fn compute_fn(tcx: QueryCtxt<'tcx>, key: &Self::Key) ->
+                fn(TyCtxt<'tcx>, Self::Key) -> Self::Value
+            {
+                if key.query_crate_is_local() {
                     tcx.queries.local_providers.$name
                 } else {
                     tcx.queries.extern_providers.$name
-                };
-                provider(*tcx, key)
+                }
             }
 
             fn hash_result(
@@ -457,20 +421,7 @@ macro_rules! define_queries {
                 }
 
                 fn force_from_dep_node(tcx: QueryCtxt<'_>, dep_node: &DepNode) -> bool {
-                    if is_anon {
-                        return false;
-                    }
-
-                    if !can_reconstruct_query_key() {
-                        return false;
-                    }
-
-                    if let Some(key) = recover(*tcx, dep_node) {
-                        force_query::<queries::$name<'_>, _>(tcx, key, DUMMY_SP, *dep_node);
-                        return true;
-                    }
-
-                    false
+                    force_query::<queries::$name<'_>, _>(tcx, dep_node)
                 }
 
                 fn try_load_from_on_disk_cache(tcx: QueryCtxt<'_>, dep_node: &DepNode) {

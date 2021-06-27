@@ -12,7 +12,6 @@
 #![stable(feature = "proc_macro_lib", since = "1.15.0")]
 #![deny(missing_docs)]
 #![doc(
-    html_root_url = "https://doc.rust-lang.org/nightly/",
     html_playground_url = "https://play.rust-lang.org/",
     issue_tracker_base_url = "https://github.com/rust-lang/rust/issues/",
     test(no_crate_inject, attr(deny(warnings))),
@@ -32,6 +31,7 @@
 #![feature(restricted_std)]
 #![feature(rustc_attrs)]
 #![feature(min_specialization)]
+#![feature(bound_cloned)]
 #![recursion_limit = "256"]
 
 #[unstable(feature = "proc_macro_internals", issue = "27812")]
@@ -44,7 +44,7 @@ mod diagnostic;
 pub use diagnostic::{Diagnostic, Level, MultiSpan};
 
 use std::cmp::Ordering;
-use std::ops::{Bound, RangeBounds};
+use std::ops::RangeBounds;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::{error, fmt, iter, mem};
@@ -85,14 +85,13 @@ impl !Sync for TokenStream {}
 
 /// Error returned from `TokenStream::from_str`.
 #[stable(feature = "proc_macro_lib", since = "1.15.0")]
+#[non_exhaustive]
 #[derive(Debug)]
-pub struct LexError {
-    _inner: (),
-}
+pub struct LexError;
 
 impl LexError {
     fn new() -> Self {
-        LexError { _inner: () }
+        LexError
     }
 }
 
@@ -708,7 +707,7 @@ impl Group {
     /// pub fn span_open(&self) -> Span {
     ///                 ^
     /// ```
-    #[unstable(feature = "proc_macro_span", issue = "54725")]
+    #[stable(feature = "proc_macro_group_span", since = "1.55.0")]
     pub fn span_open(&self) -> Span {
         Span(self.0.span_open())
     }
@@ -719,7 +718,7 @@ impl Group {
     /// pub fn span_close(&self) -> Span {
     ///                        ^
     /// ```
-    #[unstable(feature = "proc_macro_span", issue = "54725")]
+    #[stable(feature = "proc_macro_group_span", since = "1.55.0")]
     pub fn span_close(&self) -> Span {
         Span(self.0.span_close())
     }
@@ -766,7 +765,7 @@ impl fmt::Debug for Group {
     }
 }
 
-/// An `Punct` is an single punctuation character like `+`, `-` or `#`.
+/// A `Punct` is a single punctuation character such as `+`, `-` or `#`.
 ///
 /// Multi-character operators like `+=` are represented as two instances of `Punct` with different
 /// forms of `Spacing` returned.
@@ -779,16 +778,19 @@ impl !Send for Punct {}
 #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl !Sync for Punct {}
 
-/// Whether an `Punct` is followed immediately by another `Punct` or
-/// followed by another token or whitespace.
+/// Describes whether a `Punct` is followed immediately by another `Punct` ([`Spacing::Joint`]) or
+/// by a different token or whitespace ([`Spacing::Alone`]).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 pub enum Spacing {
-    /// e.g., `+` is `Alone` in `+ =`, `+ident` or `+()`.
+    /// A `Punct` is not immediately followed by another `Punct`.
+    /// E.g. `+` is `Alone` in `+ =`, `+ident` and `+()`.
     #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     Alone,
-    /// e.g., `+` is `Joint` in `+=` or `'#`.
-    /// Additionally, single quote `'` can join with identifiers to form lifetimes `'ident`.
+    /// A `Punct` is immediately followed by another `Punct`.
+    /// E.g. `+` is `Joint` in `+=` and `++`.
+    ///
+    /// Additionally, single quote `'` can join with identifiers to form lifetimes: `'ident`.
     #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     Joint,
 }
@@ -1163,16 +1165,7 @@ impl Literal {
     // was 'c' or whether it was '\u{63}'.
     #[unstable(feature = "proc_macro_span", issue = "54725")]
     pub fn subspan<R: RangeBounds<usize>>(&self, range: R) -> Option<Span> {
-        // HACK(eddyb) something akin to `Option::cloned`, but for `Bound<&T>`.
-        fn cloned_bound<T: Clone>(bound: Bound<&T>) -> Bound<T> {
-            match bound {
-                Bound::Included(x) => Bound::Included(x.clone()),
-                Bound::Excluded(x) => Bound::Excluded(x.clone()),
-                Bound::Unbounded => Bound::Unbounded,
-            }
-        }
-
-        self.0.subspan(cloned_bound(range.start_bound()), cloned_bound(range.end_bound())).map(Span)
+        self.0.subspan(range.start_bound().cloned(), range.end_bound().cloned()).map(Span)
     }
 }
 

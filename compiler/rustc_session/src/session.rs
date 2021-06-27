@@ -452,6 +452,7 @@ impl Session {
     pub fn emit_err<'a>(&'a self, err: impl SessionDiagnostic<'a>) {
         err.into_diagnostic(self).emit()
     }
+    #[inline]
     pub fn err_count(&self) -> usize {
         self.diagnostic().err_count()
     }
@@ -524,6 +525,7 @@ impl Session {
         self.diagnostic().struct_note_without_error(msg)
     }
 
+    #[inline]
     pub fn diagnostic(&self) -> &rustc_errors::Handler {
         &self.parse_sess.span_diagnostic
     }
@@ -1282,9 +1284,12 @@ pub fn build_session(
 
     let target_cfg = config::build_target_config(&sopts, target_override, &sysroot);
     let host_triple = TargetTriple::from_triple(config::host_triple());
-    let host = Target::search(&host_triple, &sysroot).unwrap_or_else(|e| {
+    let (host, target_warnings) = Target::search(&host_triple, &sysroot).unwrap_or_else(|e| {
         early_error(sopts.error_format, &format!("Error loading host specification: {}", e))
     });
+    for warning in target_warnings.warning_messages() {
+        early_warn(sopts.error_format, &warning)
+    }
 
     let loader = file_loader.unwrap_or_else(|| Box::new(RealFileLoader));
     let hash_kind = sopts.debugging_opts.src_hash_algorithm.unwrap_or_else(|| {
@@ -1511,6 +1516,14 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
     let mut sanitizer_iter = sess.opts.debugging_opts.sanitizer.into_iter();
     if let (Some(first), Some(second)) = (sanitizer_iter.next(), sanitizer_iter.next()) {
         sess.err(&format!("`-Zsanitizer={}` is incompatible with `-Zsanitizer={}`", first, second));
+    }
+
+    // Cannot enable crt-static with sanitizers on Linux
+    if sess.crt_static(None) && !sess.opts.debugging_opts.sanitizer.is_empty() {
+        sess.err(
+            "Sanitizer is incompatible with statically linked libc, \
+                                disable it using `-C target-feature=-crt-static`",
+        );
     }
 }
 

@@ -367,7 +367,14 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
         for &i in &inverse_memory_index {
             let field = fields[i as usize];
             if !sized {
-                bug!("univariant: field #{} of `{}` comes after unsized field", offsets.len(), ty);
+                self.tcx.sess.delay_span_bug(
+                    DUMMY_SP,
+                    &format!(
+                        "univariant: field #{} of `{}` comes after unsized field",
+                        offsets.len(),
+                        ty
+                    ),
+                );
             }
 
             if field.is_unsized() {
@@ -665,6 +672,15 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
 
             // SIMD vector types.
             ty::Adt(def, substs) if def.repr.simd() => {
+                if !def.is_struct() {
+                    // Should have yielded E0517 by now.
+                    tcx.sess.delay_span_bug(
+                        DUMMY_SP,
+                        "#[repr(simd)] was applied to an ADT that is not a struct",
+                    );
+                    return Err(LayoutError::Unknown(ty));
+                }
+
                 // Supported SIMD vectors are homogeneous ADTs with at least one field:
                 //
                 // * #[repr(simd)] struct S(T, T, T, T);

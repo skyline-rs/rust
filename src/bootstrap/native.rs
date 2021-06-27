@@ -21,7 +21,7 @@ use build_helper::{output, t};
 use crate::builder::{Builder, RunConfig, ShouldRun, Step};
 use crate::config::TargetSelection;
 use crate::util::{self, exe};
-use crate::GitRepo;
+use crate::{Build, GitRepo};
 use build_helper::up_to_date;
 
 pub struct Meta {
@@ -91,6 +91,82 @@ pub fn prebuilt_llvm_config(
     Err(Meta { stamp, build_llvm_config, out_dir, root: root.into() })
 }
 
+// modified from `check_submodule` and `update_submodule` in bootstrap.py
+pub(crate) fn update_llvm_submodule(build: &Build) {
+    let llvm_project = &Path::new("src").join("llvm-project");
+
+    fn dir_is_empty(dir: &Path) -> bool {
+        t!(std::fs::read_dir(dir)).next().is_none()
+    }
+
+    // NOTE: The check for the empty directory is here because when running x.py
+    // the first time, the llvm submodule won't be checked out. Check it out
+    // now so we can build it.
+    if !build.in_tree_llvm_info.is_git() && !dir_is_empty(&build.config.src.join(llvm_project)) {
+        return;
+    }
+
+    // check_submodule
+    if build.config.fast_submodules {
+        let checked_out_hash = output(
+            Command::new("git")
+                .args(&["rev-parse", "HEAD"])
+                .current_dir(build.config.src.join(llvm_project)),
+        );
+        // update_submodules
+        let recorded = output(
+            Command::new("git")
+                .args(&["ls-tree", "HEAD"])
+                .arg(llvm_project)
+                .current_dir(&build.config.src),
+        );
+        let actual_hash = recorded
+            .split_whitespace()
+            .nth(2)
+            .unwrap_or_else(|| panic!("unexpected output `{}`", recorded));
+
+        // update_submodule
+        if actual_hash == checked_out_hash.trim_end() {
+            // already checked out
+            return;
+        }
+    }
+
+    println!("Updating submodule {}", llvm_project.display());
+    build.run(
+        Command::new("git")
+            .args(&["submodule", "-q", "sync"])
+            .arg(llvm_project)
+            .current_dir(&build.config.src),
+    );
+
+    // Try passing `--progress` to start, then run git again without if that fails.
+    let update = |progress: bool| {
+        let mut git = Command::new("git");
+        git.args(&["submodule", "update", "--init", "--recursive"]);
+        if progress {
+            git.arg("--progress");
+        }
+        git.arg(llvm_project).current_dir(&build.config.src);
+        git
+    };
+    // NOTE: doesn't use `try_run` because this shouldn't print an error if it fails.
+    if !update(true).status().map_or(false, |status| status.success()) {
+        build.run(&mut update(false));
+    }
+
+    build.run(
+        Command::new("git")
+            .args(&["reset", "-q", "--hard"])
+            .current_dir(build.config.src.join(llvm_project)),
+    );
+    build.run(
+        Command::new("git")
+            .args(&["clean", "-qdfx"])
+            .current_dir(build.config.src.join(llvm_project)),
+    );
+}
+
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct Llvm {
     pub target: TargetSelection,
@@ -128,6 +204,9 @@ impl Step for Llvm {
                 Err(m) => m,
             };
 
+        if !builder.config.dry_run {
+            update_llvm_submodule(builder);
+        }
         if builder.config.llvm_link_shared
             && (target.contains("windows") || target.contains("apple-darwin"))
         {
@@ -139,7 +218,7 @@ impl Step for Llvm {
         let _time = util::timeit(&builder);
         t!(fs::create_dir_all(&out_dir));
 
-        // http://llvm.org/docs/CMake.html
+        // https://llvm.org/docs/CMake.html
         let mut cfg = cmake::Config::new(builder.src.join(root));
 
         let profile = match (builder.config.llvm_optimize, builder.config.llvm_release_debuginfo) {
@@ -153,7 +232,7 @@ impl Step for Llvm {
         let llvm_targets = match &builder.config.llvm_targets {
             Some(s) => s,
             None => {
-                "AArch64;ARM;Hexagon;MSP430;Mips;NVPTX;PowerPC;RISCV;\
+                "AArch64;ARM;BPF;Hexagon;MSP430;Mips;NVPTX;PowerPC;RISCV;\
                      Sparc;SystemZ;WebAssembly;X86"
             }
         };
@@ -181,7 +260,7 @@ impl Step for Llvm {
             .define("LLVM_TARGET_ARCH", target_native.split('-').next().unwrap())
             .define("LLVM_DEFAULT_TARGET_TRIPLE", target_native);
 
-        if target != "aarch64-apple-darwin" {
+        if target != "aarch64-apple-darwin" && !target.contains("windows") {
             cfg.define("LLVM_ENABLE_ZLIB", "ON");
         } else {
             cfg.define("LLVM_ENABLE_ZLIB", "OFF");
@@ -276,7 +355,7 @@ impl Step for Llvm {
             }
         }
 
-        // http://llvm.org/docs/HowToCrossCompileLLVM.html
+        // https://llvm.org/docs/HowToCrossCompileLLVM.html
         if target != builder.config.build {
             builder.ensure(Llvm { target: builder.config.build });
             // FIXME: if the llvm root for the build triple is overridden then we
@@ -856,5 +935,71 @@ impl HashStamp {
 
     fn write(&self) -> io::Result<()> {
         fs::write(&self.path, self.hash.as_deref().unwrap_or(b""))
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct CrtBeginEnd {
+    pub target: TargetSelection,
+}
+
+impl Step for CrtBeginEnd {
+    type Output = PathBuf;
+
+    fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
+        run.path("src/llvm-project/compiler-rt/lib/crt")
+    }
+
+    fn make_run(run: RunConfig<'_>) {
+        run.builder.ensure(CrtBeginEnd { target: run.target });
+    }
+
+    /// Build crtbegin.o/crtend.o for musl target.
+    fn run(self, builder: &Builder<'_>) -> Self::Output {
+        let out_dir = builder.native_dir(self.target).join("crt");
+
+        if builder.config.dry_run {
+            return out_dir;
+        }
+
+        let crtbegin_src = builder.src.join("src/llvm-project/compiler-rt/lib/crt/crtbegin.c");
+        let crtend_src = builder.src.join("src/llvm-project/compiler-rt/lib/crt/crtend.c");
+        if up_to_date(&crtbegin_src, &out_dir.join("crtbegin.o"))
+            && up_to_date(&crtend_src, &out_dir.join("crtendS.o"))
+        {
+            return out_dir;
+        }
+
+        builder.info("Building crtbegin.o and crtend.o");
+        t!(fs::create_dir_all(&out_dir));
+
+        let mut cfg = cc::Build::new();
+
+        if let Some(ar) = builder.ar(self.target) {
+            cfg.archiver(ar);
+        }
+        cfg.compiler(builder.cc(self.target));
+        cfg.cargo_metadata(false)
+            .out_dir(&out_dir)
+            .target(&self.target.triple)
+            .host(&builder.config.build.triple)
+            .warnings(false)
+            .debug(false)
+            .opt_level(3)
+            .file(crtbegin_src)
+            .file(crtend_src);
+
+        // Those flags are defined in src/llvm-project/compiler-rt/lib/crt/CMakeLists.txt
+        // Currently only consumer of those objects is musl, which use .init_array/.fini_array
+        // instead of .ctors/.dtors
+        cfg.flag("-std=c11")
+            .define("CRT_HAS_INITFINI_ARRAY", None)
+            .define("EH_USE_FRAME_REGISTRY", None);
+
+        cfg.compile("crt");
+
+        t!(fs::copy(out_dir.join("crtbegin.o"), out_dir.join("crtbeginS.o")));
+        t!(fs::copy(out_dir.join("crtend.o"), out_dir.join("crtendS.o")));
+        out_dir
     }
 }

@@ -139,6 +139,18 @@ impl<'a, T, const N: usize> TryFrom<&'a mut [T]> for &'a mut [T; N] {
     }
 }
 
+/// The hash of an array is the same as that of the corresponding slice,
+/// as required by the `Borrow` implementation.
+///
+/// ```
+/// #![feature(build_hasher_simple_hash_one)]
+/// use std::hash::BuildHasher;
+///
+/// let b = std::collections::hash_map::RandomState::new();
+/// let a: [u8; 3] = [0xa8, 0x3c, 0x09];
+/// let s: &[u8] = &[0xa8, 0x3c, 0x09];
+/// assert_eq!(b.hash_one(a), b.hash_one(s));
+/// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T: Hash, const N: usize> Hash for [T; N] {
     fn hash<H: hash::Hasher>(&self, state: &mut H) {
@@ -416,7 +428,7 @@ impl<T, const N: usize> [T; N] {
     {
         // SAFETY: we know for certain that this iterator will yield exactly `N`
         // items.
-        unsafe { collect_into_array_unchecked(&mut IntoIter::new(self).map(f)) }
+        unsafe { collect_into_array_unchecked(&mut IntoIterator::into_iter(self).map(f)) }
     }
 
     /// 'Zips up' two arrays into a single array of pairs.
@@ -437,7 +449,7 @@ impl<T, const N: usize> [T; N] {
     /// ```
     #[unstable(feature = "array_zip", issue = "80094")]
     pub fn zip<U>(self, rhs: [U; N]) -> [(T, U); N] {
-        let mut iter = IntoIter::new(self).zip(IntoIter::new(rhs));
+        let mut iter = IntoIterator::into_iter(self).zip(rhs);
 
         // SAFETY: we know for certain that this iterator will yield exactly `N`
         // items.

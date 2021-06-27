@@ -835,7 +835,7 @@ impl SyntaxExtension {
 /// Error type that denotes indeterminacy.
 pub struct Indeterminate;
 
-pub type DeriveResolutions = Vec<(ast::Path, Option<Lrc<SyntaxExtension>>)>;
+pub type DeriveResolutions = Vec<(ast::Path, Annotatable, Option<Lrc<SyntaxExtension>>)>;
 
 pub trait ResolverExpand {
     fn next_node_id(&mut self) -> NodeId;
@@ -1068,11 +1068,11 @@ impl<'a> ExtCtxt<'a> {
         self.resolver.check_unused_macros();
     }
 
-    /// Resolves a path mentioned inside Rust code.
+    /// Resolves a `path` mentioned inside Rust code, returning an absolute path.
     ///
-    /// This unifies the logic used for resolving `include_X!`, and `#[doc(include)]` file paths.
+    /// This unifies the logic used for resolving `include_X!`.
     ///
-    /// Returns an absolute path to the file that `path` refers to.
+    /// FIXME: move this to `rustc_builtin_macros` and make it private.
     pub fn resolve_path(
         &self,
         path: impl Into<PathBuf>,

@@ -452,7 +452,7 @@ pub trait PrettyPrinter<'tcx>:
             }
             // Re-exported `extern crate` (#43189).
             DefPathData::CrateRoot => {
-                data = DefPathData::TypeNs(self.tcx().original_crate_name(def_id.krate));
+                data = DefPathData::TypeNs(self.tcx().crate_name(def_id.krate));
             }
             _ => {}
         }
@@ -685,10 +685,10 @@ pub trait PrettyPrinter<'tcx>:
                         self = self.comma_sep(substs.as_generator().upvar_tys())?;
                     }
                     p!(")");
-                }
 
-                if substs.as_generator().is_valid() {
-                    p!(" ", print(substs.as_generator().witness()));
+                    if substs.as_generator().is_valid() {
+                        p!(" ", print(substs.as_generator().witness()));
+                    }
                 }
 
                 p!("]")

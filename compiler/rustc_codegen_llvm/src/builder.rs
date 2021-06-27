@@ -69,6 +69,7 @@ impl abi::HasDataLayout for Builder<'_, '_, '_> {
 }
 
 impl ty::layout::HasTyCtxt<'tcx> for Builder<'_, '_, 'tcx> {
+    #[inline]
     fn tcx(&self) -> TyCtxt<'tcx> {
         self.cx.tcx
     }
@@ -81,6 +82,7 @@ impl ty::layout::HasParamEnv<'tcx> for Builder<'_, '_, 'tcx> {
 }
 
 impl HasTargetSpec for Builder<'_, '_, 'tcx> {
+    #[inline]
     fn target_spec(&self) -> &Target {
         &self.cx.target_spec()
     }
@@ -98,6 +100,7 @@ impl abi::LayoutOf for Builder<'_, '_, 'tcx> {
 impl Deref for Builder<'_, 'll, 'tcx> {
     type Target = CodegenCx<'ll, 'tcx>;
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
         self.cx
     }
@@ -603,7 +606,7 @@ impl BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
                 // According to LLVM [1] building a nontemporal store must
                 // *always* point to a metadata value of the integer 1.
                 //
-                // [1]: http://llvm.org/docs/LangRef.html#store-instruction
+                // [1]: https://llvm.org/docs/LangRef.html#store-instruction
                 let one = self.cx.const_i32(1);
                 let node = llvm::LLVMMDNodeInContext(self.cx.llcx, &one, 1);
                 llvm::LLVMSetMetadata(store, llvm::MD_nontemporal as c_uint, node);

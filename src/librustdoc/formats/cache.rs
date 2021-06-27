@@ -128,7 +128,6 @@ crate struct Cache {
 /// This struct is used to wrap the `cache` and `tcx` in order to run `DocFolder`.
 struct CacheBuilder<'a, 'tcx> {
     cache: &'a mut Cache,
-    empty_cache: Cache,
     tcx: TyCtxt<'tcx>,
 }
 
@@ -173,7 +172,7 @@ impl Cache {
             self.primitive_locations.insert(prim, def_id);
         }
 
-        krate = CacheBuilder { tcx, cache: self, empty_cache: Cache::default() }.fold_crate(krate);
+        krate = CacheBuilder { tcx, cache: self }.fold_crate(krate);
 
         for (trait_did, dids, impl_) in self.orphan_trait_impls.drain(..) {
             if self.traits.contains_key(&trait_did) {
@@ -292,16 +291,17 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
                     // which should not be indexed. The crate-item itself is
                     // inserted later on when serializing the search-index.
                     if item.def_id.index().map_or(false, |idx| idx != CRATE_DEF_INDEX) {
+                        let desc = item.doc_value().map_or_else(String::new, |x| {
+                            short_markdown_summary(&x.as_str(), &item.link_names(&self.cache))
+                        });
                         self.cache.search_index.push(IndexItem {
                             ty: item.type_(),
                             name: s.to_string(),
                             path: path.join("::"),
-                            desc: item
-                                .doc_value()
-                                .map_or_else(String::new, |x| short_markdown_summary(&x.as_str())),
+                            desc,
                             parent,
                             parent_idx: None,
-                            search_type: get_index_search_type(&item, &self.empty_cache, self.tcx),
+                            search_type: get_index_search_type(&item, self.tcx),
                             aliases: item.attrs.get_doc_aliases(),
                         });
                     }
@@ -402,6 +402,15 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
                         self.cache.parent_stack.push(did);
                         true
                     }
+                    clean::DynTrait(ref bounds, _)
+                    | clean::BorrowedRef { type_: box clean::DynTrait(ref bounds, _), .. } => {
+                        if let Some(did) = bounds[0].trait_.def_id() {
+                            self.cache.parent_stack.push(did);
+                            true
+                        } else {
+                            false
+                        }
+                    }
                     ref t => {
                         let prim_did = t
                             .primitive_type()
@@ -431,6 +440,12 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
                 clean::ResolvedPath { did, .. }
                 | clean::BorrowedRef { type_: box clean::ResolvedPath { did, .. }, .. } => {
                     dids.insert(did);
+                }
+                clean::DynTrait(ref bounds, _)
+                | clean::BorrowedRef { type_: box clean::DynTrait(ref bounds, _), .. } => {
+                    if let Some(did) = bounds[0].trait_.def_id() {
+                        dids.insert(did);
+                    }
                 }
                 ref t => {
                     let did = t

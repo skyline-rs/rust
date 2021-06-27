@@ -21,7 +21,7 @@ use rustc_data_structures::sync::SeqCst;
 use rustc_errors::registry::{InvalidErrorCode, Registry};
 use rustc_errors::{ErrorReported, PResult};
 use rustc_feature::find_gated_cfg;
-use rustc_interface::util::{self, collect_crate_types, get_builtin_codegen_backend};
+use rustc_interface::util::{self, collect_crate_types, get_codegen_backend};
 use rustc_interface::{interface, Queries};
 use rustc_lint::LintStore;
 use rustc_metadata::locator;
@@ -499,7 +499,7 @@ fn make_input(
     }
 }
 
-// Whether to stop or continue compilation.
+/// Whether to stop or continue compilation.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Compilation {
     Stop,
@@ -528,8 +528,12 @@ fn stderr_isatty() -> bool {
 }
 
 fn handle_explain(registry: Registry, code: &str, output: ErrorOutputType) {
-    let normalised =
-        if code.starts_with('E') { code.to_string() } else { format!("E{0:0>4}", code) };
+    let upper_cased_code = code.to_ascii_uppercase();
+    let normalised = if upper_cased_code.starts_with('E') {
+        upper_cased_code
+    } else {
+        format!("E{0:0>4}", code)
+    };
     match registry.try_find_description(&normalised) {
         Ok(Some(description)) => {
             let mut is_in_code_block = false;
@@ -765,9 +769,16 @@ pub fn version(binary: &str, matches: &getopts::Matches) {
         println!("commit-date: {}", unw(util::commit_date_str()));
         println!("host: {}", config::host_triple());
         println!("release: {}", unw(util::release_str()));
-        if cfg!(feature = "llvm") {
-            get_builtin_codegen_backend(&None, "llvm")().print_version();
-        }
+
+        let debug_flags = matches.opt_strs("Z");
+        let backend_name = debug_flags.iter().find_map(|x| {
+            if x.starts_with("codegen-backend=") {
+                Some(&x["codegen-backends=".len()..])
+            } else {
+                None
+            }
+        });
+        get_codegen_backend(&None, backend_name).print_version();
     }
 }
 
@@ -1039,8 +1050,8 @@ pub fn handle_options(args: &[String]) -> Option<getopts::Matches> {
     }
 
     // Don't handle -W help here, because we might first load plugins.
-    let r = matches.opt_strs("Z");
-    if r.iter().any(|x| *x == "help") {
+    let debug_flags = matches.opt_strs("Z");
+    if debug_flags.iter().any(|x| *x == "help") {
         describe_debug_flags();
         return None;
     }
@@ -1060,9 +1071,14 @@ pub fn handle_options(args: &[String]) -> Option<getopts::Matches> {
     }
 
     if cg_flags.iter().any(|x| *x == "passes=list") {
-        if cfg!(feature = "llvm") {
-            get_builtin_codegen_backend(&None, "llvm")().print_passes();
-        }
+        let backend_name = debug_flags.iter().find_map(|x| {
+            if x.starts_with("codegen-backend=") {
+                Some(&x["codegen-backends=".len()..])
+            } else {
+                None
+            }
+        });
+        get_codegen_backend(&None, backend_name).print_passes();
         return None;
     }
 
@@ -1151,23 +1167,26 @@ pub fn catch_with_exit_code(f: impl FnOnce() -> interface::Result<()>) -> i32 {
 static DEFAULT_HOOK: SyncLazy<Box<dyn Fn(&panic::PanicInfo<'_>) + Sync + Send + 'static>> =
     SyncLazy::new(|| {
         let hook = panic::take_hook();
-        panic::set_hook(Box::new(|info| report_ice(info, BUG_REPORT_URL)));
+        panic::set_hook(Box::new(|info| {
+            // Invoke the default handler, which prints the actual panic message and optionally a backtrace
+            (*DEFAULT_HOOK)(info);
+
+            // Separate the output with an empty line
+            eprintln!();
+
+            // Print the ICE message
+            report_ice(info, BUG_REPORT_URL);
+        }));
         hook
     });
 
-/// Prints the ICE message, including backtrace and query stack.
+/// Prints the ICE message, including query stack, but without backtrace.
 ///
 /// The message will point the user at `bug_report_url` to report the ICE.
 ///
 /// When `install_ice_hook` is called, this function will be called as the panic
 /// hook.
 pub fn report_ice(info: &panic::PanicInfo<'_>, bug_report_url: &str) {
-    // Invoke the default handler, which prints the actual panic message and optionally a backtrace
-    (*DEFAULT_HOOK)(info);
-
-    // Separate the output with an empty line
-    eprintln!();
-
     let emitter = Box::new(rustc_errors::emitter::EmitterWriter::stderr(
         rustc_errors::ColorConfig::Auto,
         None,

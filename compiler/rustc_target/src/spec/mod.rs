@@ -25,7 +25,7 @@
 //!
 //! # Defining a new target
 //!
-//! Targets are defined using [JSON](http://json.org/). The `Target` struct in
+//! Targets are defined using [JSON](https://json.org/). The `Target` struct in
 //! this module defines the format the JSON file should take, though each
 //! underscore in the field names should be replaced with a hyphen (`-`) in the
 //! JSON file. Some fields are required in every target specification, such as
@@ -57,6 +57,7 @@ mod apple_base;
 mod apple_sdk_base;
 mod arm_base;
 mod avr_gnu_base;
+mod bpf_base;
 mod dragonfly_base;
 mod freebsd_base;
 mod fuchsia_base;
@@ -93,6 +94,7 @@ pub enum LinkerFlavor {
     Msvc,
     Lld(LldFlavor),
     PtxLinker,
+    BpfLinker,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -161,6 +163,7 @@ flavor_mappings! {
     ((LinkerFlavor::Ld), "ld"),
     ((LinkerFlavor::Msvc), "msvc"),
     ((LinkerFlavor::PtxLinker), "ptx-linker"),
+    ((LinkerFlavor::BpfLinker), "bpf-linker"),
     ((LinkerFlavor::Lld(LldFlavor::Wasm)), "wasm-ld"),
     ((LinkerFlavor::Lld(LldFlavor::Ld64)), "ld64.lld"),
     ((LinkerFlavor::Lld(LldFlavor::Ld)), "ld.lld"),
@@ -766,6 +769,7 @@ supported_targets! {
     ("armv7-unknown-freebsd", armv7_unknown_freebsd),
     ("i686-unknown-freebsd", i686_unknown_freebsd),
     ("powerpc64-unknown-freebsd", powerpc64_unknown_freebsd),
+    ("powerpc64le-unknown-freebsd", powerpc64le_unknown_freebsd),
     ("x86_64-unknown-freebsd", x86_64_unknown_freebsd),
 
     ("x86_64-unknown-dragonfly", x86_64_unknown_dragonfly),
@@ -899,6 +903,40 @@ supported_targets! {
     ("aarch64_be-unknown-linux-gnu_ilp32", aarch64_be_unknown_linux_gnu_ilp32),
 
     ("aarch64-skyline-switch", aarch64_skyline_switch),
+    ("bpfeb-unknown-none", bpfeb_unknown_none),
+    ("bpfel-unknown-none", bpfel_unknown_none),
+}
+
+/// Warnings encountered when parsing the target `json`.
+///
+/// Includes fields that weren't recognized and fields that don't have the expected type.
+#[derive(Debug, PartialEq)]
+pub struct TargetWarnings {
+    unused_fields: Vec<String>,
+    incorrect_type: Vec<String>,
+}
+
+impl TargetWarnings {
+    pub fn empty() -> Self {
+        Self { unused_fields: Vec::new(), incorrect_type: Vec::new() }
+    }
+
+    pub fn warning_messages(&self) -> Vec<String> {
+        let mut warnings = vec![];
+        if !self.unused_fields.is_empty() {
+            warnings.push(format!(
+                "target json file contains unused fields: {}",
+                self.unused_fields.join(", ")
+            ));
+        }
+        if !self.incorrect_type.is_empty() {
+            warnings.push(format!(
+                "target json file contains fields whose value doesn't have the correct json type: {}",
+                self.incorrect_type.join(", ")
+            ));
+        }
+        warnings
+    }
 }
 
 /// Everything `rustc` knows about how to compile for a specific target.
@@ -913,7 +951,7 @@ pub struct Target {
     /// Architecture to use for ABI considerations. Valid options include: "x86",
     /// "x86_64", "arm", "aarch64", "mips", "powerpc", "powerpc64", and others.
     pub arch: String,
-    /// [Data layout](http://llvm.org/docs/LangRef.html#data-layout) to pass to LLVM.
+    /// [Data layout](https://llvm.org/docs/LangRef.html#data-layout) to pass to LLVM.
     pub data_layout: String,
     /// Optional settings with defaults.
     pub options: TargetOptions,
@@ -924,6 +962,7 @@ pub trait HasTargetSpec {
 }
 
 impl HasTargetSpec for Target {
+    #[inline]
     fn target_spec(&self) -> &Target {
         self
     }
@@ -1442,7 +1481,7 @@ impl Target {
     }
 
     /// Loads a target descriptor from a JSON object.
-    pub fn from_json(obj: Json) -> Result<Target, String> {
+    pub fn from_json(mut obj: Json) -> Result<(Target, TargetWarnings), String> {
         // While ugly, this code must remain this way to retain
         // compatibility with existing JSON fields and the internal
         // expected naming of the Target and TargetOptions structs.
@@ -1450,10 +1489,9 @@ impl Target {
         // are round-tripped through this code to catch cases where
         // the JSON parser is not updated to match the structs.
 
-        let get_req_field = |name: &str| {
-            obj.find(name)
-                .and_then(Json::as_string)
-                .map(str::to_string)
+        let mut get_req_field = |name: &str| {
+            obj.remove_key(name)
+                .and_then(|j| Json::as_string(&j).map(str::to_string))
                 .ok_or_else(|| format!("Field {} in target specification is required", name))
         };
 
@@ -1467,28 +1505,30 @@ impl Target {
             options: Default::default(),
         };
 
+        let mut incorrect_type = vec![];
+
         macro_rules! key {
             ($key_name:ident) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(s) = obj.find(&name).and_then(Json::as_string) {
-                    base.$key_name = s.to_string();
+                if let Some(s) = obj.remove_key(&name).and_then(|j| Json::as_string(&j).map(str::to_string)) {
+                    base.$key_name = s;
                 }
             } );
             ($key_name:ident = $json_name:expr) => ( {
                 let name = $json_name;
-                if let Some(s) = obj.find(&name).and_then(Json::as_string) {
-                    base.$key_name = s.to_string();
+                if let Some(s) = obj.remove_key(&name).and_then(|j| Json::as_string(&j).map(str::to_string)) {
+                    base.$key_name = s;
                 }
             } );
             ($key_name:ident, bool) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(s) = obj.find(&name).and_then(Json::as_boolean) {
+                if let Some(s) = obj.remove_key(&name).and_then(|j| Json::as_boolean(&j)) {
                     base.$key_name = s;
                 }
             } );
             ($key_name:ident, Option<u32>) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(s) = obj.find(&name).and_then(Json::as_u64) {
+                if let Some(s) = obj.remove_key(&name).and_then(|j| Json::as_u64(&j)) {
                     if s < 1 || s > 5 {
                         return Err("Not a valid DWARF version number".to_string());
                     }
@@ -1497,13 +1537,13 @@ impl Target {
             } );
             ($key_name:ident, Option<u64>) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(s) = obj.find(&name).and_then(Json::as_u64) {
+                if let Some(s) = obj.remove_key(&name).and_then(|j| Json::as_u64(&j)) {
                     base.$key_name = Some(s);
                 }
             } );
             ($key_name:ident, MergeFunctions) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.find(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
                     match s.parse::<MergeFunctions>() {
                         Ok(mergefunc) => base.$key_name = mergefunc,
                         _ => return Some(Err(format!("'{}' is not a valid value for \
@@ -1516,7 +1556,7 @@ impl Target {
             } );
             ($key_name:ident, RelocModel) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.find(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
                     match s.parse::<RelocModel>() {
                         Ok(relocation_model) => base.$key_name = relocation_model,
                         _ => return Some(Err(format!("'{}' is not a valid relocation model. \
@@ -1528,7 +1568,7 @@ impl Target {
             } );
             ($key_name:ident, CodeModel) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.find(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
                     match s.parse::<CodeModel>() {
                         Ok(code_model) => base.$key_name = Some(code_model),
                         _ => return Some(Err(format!("'{}' is not a valid code model. \
@@ -1540,7 +1580,7 @@ impl Target {
             } );
             ($key_name:ident, TlsModel) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.find(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
                     match s.parse::<TlsModel>() {
                         Ok(tls_model) => base.$key_name = tls_model,
                         _ => return Some(Err(format!("'{}' is not a valid TLS model. \
@@ -1552,7 +1592,7 @@ impl Target {
             } );
             ($key_name:ident, PanicStrategy) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.find(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
                     match s {
                         "unwind" => base.$key_name = PanicStrategy::Unwind,
                         "abort" => base.$key_name = PanicStrategy::Abort,
@@ -1565,7 +1605,7 @@ impl Target {
             } );
             ($key_name:ident, RelroLevel) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.find(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
                     match s.parse::<RelroLevel>() {
                         Ok(level) => base.$key_name = level,
                         _ => return Some(Err(format!("'{}' is not a valid value for \
@@ -1577,7 +1617,7 @@ impl Target {
             } );
             ($key_name:ident, SplitDebuginfo) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.find(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
                     match s.parse::<SplitDebuginfo>() {
                         Ok(level) => base.$key_name = level,
                         _ => return Some(Err(format!("'{}' is not a valid value for \
@@ -1589,23 +1629,31 @@ impl Target {
             } );
             ($key_name:ident, list) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(v) = obj.find(&name).and_then(Json::as_array) {
-                    base.$key_name = v.iter()
-                        .map(|a| a.as_string().unwrap().to_string())
-                        .collect();
+                if let Some(j) = obj.remove_key(&name){
+                    if let Some(v) = Json::as_array(&j) {
+                        base.$key_name = v.iter()
+                            .map(|a| a.as_string().unwrap().to_string())
+                            .collect();
+                    } else {
+                        incorrect_type.push(name)
+                    }
                 }
             } );
             ($key_name:ident, opt_list) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(v) = obj.find(&name).and_then(Json::as_array) {
-                    base.$key_name = Some(v.iter()
-                        .map(|a| a.as_string().unwrap().to_string())
-                        .collect());
+                if let Some(j) = obj.remove_key(&name) {
+                    if let Some(v) = Json::as_array(&j) {
+                        base.$key_name = Some(v.iter()
+                            .map(|a| a.as_string().unwrap().to_string())
+                            .collect());
+                    } else {
+                        incorrect_type.push(name)
+                    }
                 }
             } );
             ($key_name:ident, optional) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(o) = obj.find(&name[..]) {
+                if let Some(o) = obj.remove_key(&name[..]) {
                     base.$key_name = o
                         .as_string()
                         .map(|s| s.to_string() );
@@ -1613,7 +1661,7 @@ impl Target {
             } );
             ($key_name:ident, LldFlavor) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.find(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
                     if let Some(flavor) = LldFlavor::from_str(&s) {
                         base.$key_name = flavor;
                     } else {
@@ -1627,7 +1675,7 @@ impl Target {
             } );
             ($key_name:ident, LinkerFlavor) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.find(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
                     match LinkerFlavor::from_str(s) {
                         Some(linker_flavor) => base.$key_name = linker_flavor,
                         _ => return Some(Err(format!("'{}' is not a valid value for linker-flavor. \
@@ -1638,7 +1686,7 @@ impl Target {
             } );
             ($key_name:ident, StackProbeType) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.find(&name[..]).and_then(|o| match StackProbeType::from_json(o) {
+                obj.remove_key(&name[..]).and_then(|o| match StackProbeType::from_json(&o) {
                     Ok(v) => {
                         base.$key_name = v;
                         Some(Ok(()))
@@ -1650,25 +1698,29 @@ impl Target {
             } );
             ($key_name:ident, SanitizerSet) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.find(&name[..]).and_then(|o| o.as_array()).and_then(|a| {
-                    for s in a {
-                        base.$key_name |= match s.as_string() {
-                            Some("address") => SanitizerSet::ADDRESS,
-                            Some("leak") => SanitizerSet::LEAK,
-                            Some("memory") => SanitizerSet::MEMORY,
-                            Some("thread") => SanitizerSet::THREAD,
-                            Some("hwaddress") => SanitizerSet::HWADDRESS,
-                            Some(s) => return Some(Err(format!("unknown sanitizer {}", s))),
-                            _ => return Some(Err(format!("not a string: {:?}", s))),
-                        };
+                if let Some(o) = obj.remove_key(&name[..]) {
+                    if let Some(a) = o.as_array() {
+                        for s in a {
+                            base.$key_name |= match s.as_string() {
+                                Some("address") => SanitizerSet::ADDRESS,
+                                Some("leak") => SanitizerSet::LEAK,
+                                Some("memory") => SanitizerSet::MEMORY,
+                                Some("thread") => SanitizerSet::THREAD,
+                                Some("hwaddress") => SanitizerSet::HWADDRESS,
+                                Some(s) => return Err(format!("unknown sanitizer {}", s)),
+                                _ => return Err(format!("not a string: {:?}", s)),
+                            };
+                        }
+                    } else {
+                        incorrect_type.push(name)
                     }
-                    Some(Ok(()))
-                }).unwrap_or(Ok(()))
+                }
+                Ok::<(), String>(())
             } );
 
             ($key_name:ident, crt_objects_fallback) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.find(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
                     match s.parse::<CrtObjectsFallback>() {
                         Ok(fallback) => base.$key_name = Some(fallback),
                         _ => return Some(Err(format!("'{}' is not a valid CRT objects fallback. \
@@ -1679,7 +1731,7 @@ impl Target {
             } );
             ($key_name:ident, link_objects) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(val) = obj.find(&name[..]) {
+                if let Some(val) = obj.remove_key(&name[..]) {
                     let obj = val.as_object().ok_or_else(|| format!("{}: expected a \
                         JSON object with fields per CRT object kind.", name))?;
                     let mut args = CrtObjects::new();
@@ -1707,7 +1759,7 @@ impl Target {
             } );
             ($key_name:ident, link_args) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(val) = obj.find(&name[..]) {
+                if let Some(val) = obj.remove_key(&name[..]) {
                     let obj = val.as_object().ok_or_else(|| format!("{}: expected a \
                         JSON object with fields per linker-flavor.", name))?;
                     let mut args = LinkArgs::new();
@@ -1734,22 +1786,26 @@ impl Target {
             } );
             ($key_name:ident, env) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(a) = obj.find(&name[..]).and_then(|o| o.as_array()) {
-                    for o in a {
-                        if let Some(s) = o.as_string() {
-                            let p = s.split('=').collect::<Vec<_>>();
-                            if p.len() == 2 {
-                                let k = p[0].to_string();
-                                let v = p[1].to_string();
-                                base.$key_name.push((k, v));
+                if let Some(o) = obj.remove_key(&name[..]) {
+                    if let Some(a) = o.as_array() {
+                        for o in a {
+                            if let Some(s) = o.as_string() {
+                                let p = s.split('=').collect::<Vec<_>>();
+                                if p.len() == 2 {
+                                    let k = p[0].to_string();
+                                    let v = p[1].to_string();
+                                    base.$key_name.push((k, v));
+                                }
                             }
                         }
+                    } else {
+                        incorrect_type.push(name)
                     }
                 }
             } );
             ($key_name:ident, Option<Abi>) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.find(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
                     match lookup_abi(s) {
                         Some(abi) => base.$key_name = Some(abi),
                         _ => return Some(Err(format!("'{}' is not a valid value for abi", s))),
@@ -1758,20 +1814,26 @@ impl Target {
                 })).unwrap_or(Ok(()))
             } );
             ($key_name:ident, TargetFamilies) => ( {
-                let value = obj.find("target-family");
-                if let Some(v) = value.and_then(Json::as_array) {
-                    base.$key_name = v.iter()
-                        .map(|a| a.as_string().unwrap().to_string())
-                        .collect();
-                } else if let Some(v) = value.and_then(Json::as_string) {
-                    base.$key_name = vec![v.to_string()];
+                if let Some(value) = obj.remove_key("target-family") {
+                    if let Some(v) = Json::as_array(&value) {
+                        base.$key_name = v.iter()
+                            .map(|a| a.as_string().unwrap().to_string())
+                            .collect();
+                    } else if let Some(v) = Json::as_string(&value) {
+                        base.$key_name = vec![v.to_string()];
+                    }
                 }
             } );
         }
 
-        if let Some(s) = obj.find("target-endian").and_then(Json::as_string) {
-            base.endian = s.parse()?;
+        if let Some(j) = obj.remove_key("target-endian") {
+            if let Some(s) = Json::as_string(&j) {
+                base.endian = s.parse()?;
+            } else {
+                incorrect_type.push("target-endian".to_string())
+            }
         }
+
         key!(is_builtin, bool);
         key!(c_int_width = "target-c-int-width");
         key!(os);
@@ -1871,32 +1933,39 @@ impl Target {
         // NB: The old name is deprecated, but support for it is retained for
         // compatibility.
         for name in ["abi-blacklist", "unsupported-abis"].iter() {
-            if let Some(array) = obj.find(name).and_then(Json::as_array) {
-                for name in array.iter().filter_map(|abi| abi.as_string()) {
-                    match lookup_abi(name) {
-                        Some(abi) => {
-                            if abi.generic() {
+            if let Some(j) = obj.remove_key(name) {
+                if let Some(array) = Json::as_array(&j) {
+                    for name in array.iter().filter_map(|abi| abi.as_string()) {
+                        match lookup_abi(name) {
+                            Some(abi) => {
+                                if abi.generic() {
+                                    return Err(format!(
+                                        "The ABI \"{}\" is considered to be supported on all \
+                                        targets and cannot be marked unsupported",
+                                        abi
+                                    ));
+                                }
+
+                                base.unsupported_abis.push(abi)
+                            }
+                            None => {
                                 return Err(format!(
-                                    "The ABI \"{}\" is considered to be supported on all \
-                                    targets and cannot be marked unsupported",
-                                    abi
+                                    "Unknown ABI \"{}\" in target specification",
+                                    name
                                 ));
                             }
-
-                            base.unsupported_abis.push(abi)
-                        }
-                        None => {
-                            return Err(format!(
-                                "Unknown ABI \"{}\" in target specification",
-                                name
-                            ));
                         }
                     }
                 }
             }
         }
 
-        Ok(base)
+        // Each field should have been read using `Json::remove_key` so any keys remaining are unused.
+        let remaining_keys = obj.as_object().ok_or("Expected JSON object for target")?.keys();
+        Ok((
+            base,
+            TargetWarnings { unused_fields: remaining_keys.cloned().collect(), incorrect_type },
+        ))
     }
 
     /// Search for a JSON file specifying the given target triple.
@@ -1908,12 +1977,15 @@ impl Target {
     ///
     /// The error string could come from any of the APIs called, including filesystem access and
     /// JSON decoding.
-    pub fn search(target_triple: &TargetTriple, sysroot: &PathBuf) -> Result<Target, String> {
+    pub fn search(
+        target_triple: &TargetTriple,
+        sysroot: &PathBuf,
+    ) -> Result<(Target, TargetWarnings), String> {
         use rustc_serialize::json;
         use std::env;
         use std::fs;
 
-        fn load_file(path: &Path) -> Result<Target, String> {
+        fn load_file(path: &Path) -> Result<(Target, TargetWarnings), String> {
             let contents = fs::read(path).map_err(|e| e.to_string())?;
             let obj = json::from_reader(&mut &contents[..]).map_err(|e| e.to_string())?;
             Target::from_json(obj)
@@ -1923,7 +1995,7 @@ impl Target {
             TargetTriple::TargetTriple(ref target_triple) => {
                 // check if triple is in list of built-in targets
                 if let Some(t) = load_builtin(target_triple) {
-                    return Ok(t);
+                    return Ok((t, TargetWarnings::empty()));
                 }
 
                 // search for a file named `target_triple`.json in RUST_TARGET_PATH

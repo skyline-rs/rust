@@ -210,7 +210,6 @@ cfg_if::cfg_if! {
     if #[cfg(target_os = "android")] {
         #[link(name = "dl")]
         #[link(name = "log")]
-        #[link(name = "gcc")]
         extern "C" {}
     } else if #[cfg(target_os = "freebsd")] {
         #[link(name = "execinfo")]
@@ -241,7 +240,7 @@ cfg_if::cfg_if! {
     } else if #[cfg(target_os = "macos")] {
         #[link(name = "System")]
         // res_init and friends require -lresolv on macOS/iOS.
-        // See #41582 and http://blog.achernya.com/2013/03/os-x-has-silly-libsystem.html
+        // See #41582 and https://blog.achernya.com/2013/03/os-x-has-silly-libsystem.html
         #[link(name = "resolv")]
         extern "C" {}
     } else if #[cfg(target_os = "ios")] {

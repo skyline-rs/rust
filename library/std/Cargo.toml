@@ -16,11 +16,11 @@ cfg-if = { version = "0.1.8", features = ['rustc-dep-of-std'] }
 panic_unwind = { path = "../panic_unwind", optional = true }
 panic_abort = { path = "../panic_abort" }
 core = { path = "../core" }
-compiler_builtins = { version = "0.1.43" }
 #libc-nnsdk = { git = "https://github.com/ultimate-research/libc-nnsdk.git", features = ['rustc-dep-of-std']}
 #nnsdk = { git = "https://github.com/ultimate-research/nnsdk-rs.git", features = ["rustc-dep-of-std"] }
 #nnsdk = { path = "../../../nnsdk-rs", features = ["rustc-dep-of-std"] }
-#libc = { version = "0.2.79", default-features = false, features = ['rustc-dep-of-std'] }
+#libc = { version = "0.2.93", default-features = false, features = ['rustc-dep-of-std'] }
+compiler_builtins = { version = "0.1.44" }
 profiler_builtins = { path = "../profiler_builtins", optional = true }
 unwind = { path = "../unwind" }
 hashbrown = { version = "0.11", default-features = false, features = ['rustc-dep-of-std'] }

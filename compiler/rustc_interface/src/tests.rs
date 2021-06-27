@@ -96,6 +96,14 @@ fn assert_different_hash(x: &Options, y: &Options) {
     assert_same_clone(y);
 }
 
+fn assert_non_crate_hash_different(x: &Options, y: &Options) {
+    assert_eq!(x.dep_tracking_hash(true), y.dep_tracking_hash(true));
+    assert_ne!(x.dep_tracking_hash(false), y.dep_tracking_hash(false));
+    // Check clone
+    assert_same_clone(x);
+    assert_same_clone(y);
+}
+
 // When the user supplies --test we should implicitly supply --cfg test
 #[test]
 fn test_switch_implies_cfg_test() {
@@ -152,9 +160,9 @@ fn test_output_types_tracking_hash_different_paths() {
     v2.output_types = OutputTypes::new(&[(OutputType::Exe, Some(PathBuf::from("/some/thing")))]);
     v3.output_types = OutputTypes::new(&[(OutputType::Exe, None)]);
 
-    assert_different_hash(&v1, &v2);
-    assert_different_hash(&v1, &v3);
-    assert_different_hash(&v2, &v3);
+    assert_non_crate_hash_different(&v1, &v2);
+    assert_non_crate_hash_different(&v1, &v3);
+    assert_non_crate_hash_different(&v2, &v3);
 }
 
 #[test]
@@ -252,7 +260,8 @@ fn test_lints_tracking_hash_different_construction_order() {
         (String::from("d"), Level::Forbid),
     ];
 
-    assert_same_hash(&v1, &v2);
+    // The hash should be order-dependent
+    assert_different_hash(&v1, &v2);
 }
 
 #[test]
@@ -491,9 +500,10 @@ fn test_native_libs_tracking_hash_different_order() {
         },
     ];
 
-    assert_same_hash(&v1, &v2);
-    assert_same_hash(&v1, &v3);
-    assert_same_hash(&v2, &v3);
+    // The hash should be order-dependent
+    assert_different_hash(&v1, &v2);
+    assert_different_hash(&v1, &v3);
+    assert_different_hash(&v2, &v3);
 }
 
 #[test]
@@ -705,15 +715,14 @@ fn test_debugging_options_tracking_hash() {
     tracked!(instrument_coverage, Some(InstrumentCoverage::All));
     tracked!(instrument_mcount, true);
     tracked!(link_only, true);
+    tracked!(llvm_plugins, vec![String::from("plugin_name")]);
     tracked!(merge_functions, Some(MergeFunctions::Disabled));
     tracked!(mir_emit_retag, true);
     tracked!(mir_opt_level, Some(4));
     tracked!(mutable_noalias, Some(true));
     tracked!(new_llvm_pass_manager, Some(true));
-    tracked!(no_codegen, true);
     tracked!(no_generate_arange_section, true);
     tracked!(no_link, true);
-    tracked!(no_profiler_runtime, true);
     tracked!(osx_rpath_install_name, true);
     tracked!(panic_abort_tests, true);
     tracked!(plt, Some(true));
@@ -722,6 +731,7 @@ fn test_debugging_options_tracking_hash() {
     tracked!(print_fuel, Some("abc".to_string()));
     tracked!(profile, true);
     tracked!(profile_emit, Some(PathBuf::from("abc")));
+    tracked!(profiler_runtime, None);
     tracked!(relax_elf_relocations, Some(true));
     tracked!(relro_level, Some(RelroLevel::Full));
     tracked!(simulate_remapped_rust_src_base, Some(PathBuf::from("/rustc/abc")));
@@ -745,6 +755,16 @@ fn test_debugging_options_tracking_hash() {
     tracked!(use_ctors_section, Some(true));
     tracked!(verify_llvm_ir, true);
     tracked!(wasi_exec_model, Some(WasiExecModel::Reactor));
+
+    macro_rules! tracked_no_crate_hash {
+        ($name: ident, $non_default_value: expr) => {
+            opts = reference.clone();
+            assert_ne!(opts.debugging_opts.$name, $non_default_value);
+            opts.debugging_opts.$name = $non_default_value;
+            assert_non_crate_hash_different(&reference, &opts);
+        };
+    }
+    tracked_no_crate_hash!(no_codegen, true);
 }
 
 #[test]

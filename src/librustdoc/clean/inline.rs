@@ -15,7 +15,9 @@ use rustc_span::hygiene::MacroKind;
 use rustc_span::symbol::{kw, sym, Symbol};
 use rustc_span::Span;
 
-use crate::clean::{self, Attributes, AttributesExt, FakeDefId, GetDefId, ToSource};
+use crate::clean::{
+    self, Attributes, AttributesExt, FakeDefId, GetDefId, NestedAttributesExt, ToSource, Type,
+};
 use crate::core::DocContext;
 use crate::formats::item_type::ItemType;
 
@@ -420,6 +422,21 @@ crate fn build_impl(
     if trait_.def_id() == tcx.lang_items().deref_trait() {
         super::build_deref_target_impls(cx, &trait_items, ret);
     }
+
+    // Return if the trait itself or any types of the generic parameters are doc(hidden).
+    let mut stack: Vec<&Type> = trait_.iter().collect();
+    stack.push(&for_);
+    while let Some(ty) = stack.pop() {
+        if let Some(did) = ty.def_id() {
+            if cx.tcx.get_attrs(did).lists(sym::doc).has_word(sym::hidden) {
+                return;
+            }
+        }
+        if let Some(generics) = ty.generics() {
+            stack.extend(generics);
+        }
+    }
+
     if let Some(trait_did) = trait_.def_id() {
         record_extern_trait(cx, trait_did);
     }
@@ -527,7 +544,7 @@ fn build_static(cx: &mut DocContext<'_>, did: DefId, mutable: bool) -> clean::St
 }
 
 fn build_macro(cx: &mut DocContext<'_>, did: DefId, name: Symbol) -> clean::ItemKind {
-    let imported_from = cx.tcx.original_crate_name(did.krate);
+    let imported_from = cx.tcx.crate_name(did.krate);
     match cx.enter_resolver(|r| r.cstore().load_macro_untracked(did, cx.sess())) {
         LoadedMacro::MacroDef(def, _) => {
             let matchers: Vec<Span> = if let ast::ItemKind::MacroDef(ref def) = def.kind {
@@ -566,9 +583,11 @@ fn build_macro(cx: &mut DocContext<'_>, did: DefId, name: Symbol) -> clean::Item
 fn filter_non_trait_generics(trait_did: DefId, mut g: clean::Generics) -> clean::Generics {
     for pred in &mut g.where_predicates {
         match *pred {
-            clean::WherePredicate::BoundPredicate { ty: clean::Generic(ref s), ref mut bounds }
-                if *s == kw::SelfUpper =>
-            {
+            clean::WherePredicate::BoundPredicate {
+                ty: clean::Generic(ref s),
+                ref mut bounds,
+                ..
+            } if *s == kw::SelfUpper => {
                 bounds.retain(|bound| match *bound {
                     clean::GenericBound::TraitBound(
                         clean::PolyTrait { trait_: clean::ResolvedPath { did, .. }, .. },
@@ -591,6 +610,7 @@ fn filter_non_trait_generics(trait_did: DefId, mut g: clean::Generics) -> clean:
                     ..
                 },
             ref bounds,
+            ..
         } => !(bounds.is_empty() || *s == kw::SelfUpper && did == trait_did),
         _ => true,
     });
@@ -605,7 +625,7 @@ fn separate_supertrait_bounds(
 ) -> (clean::Generics, Vec<clean::GenericBound>) {
     let mut ty_bounds = Vec::new();
     g.where_predicates.retain(|pred| match *pred {
-        clean::WherePredicate::BoundPredicate { ty: clean::Generic(ref s), ref bounds }
+        clean::WherePredicate::BoundPredicate { ty: clean::Generic(ref s), ref bounds, .. }
             if *s == kw::SelfUpper =>
         {
             ty_bounds.extend(bounds.iter().cloned());

@@ -514,6 +514,30 @@ impl<'a, 'tcx> InferCtxtExt<'tcx> for InferCtxt<'a, 'tcx> {
                             }
                         }
 
+                        // Return early if the trait is Debug or Display and the invocation
+                        // originates within a standard library macro, because the output
+                        // is otherwise overwhelming and unhelpful (see #85844 for an
+                        // example).
+
+                        let trait_is_debug =
+                            self.tcx.is_diagnostic_item(sym::debug_trait, trait_ref.def_id());
+                        let trait_is_display =
+                            self.tcx.is_diagnostic_item(sym::display_trait, trait_ref.def_id());
+
+                        let in_std_macro =
+                            match obligation.cause.span.ctxt().outer_expn_data().macro_def_id {
+                                Some(macro_def_id) => {
+                                    let crate_name = tcx.crate_name(macro_def_id.krate);
+                                    crate_name == sym::std || crate_name == sym::core
+                                }
+                                None => false,
+                            };
+
+                        if in_std_macro && (trait_is_debug || trait_is_display) {
+                            err.emit();
+                            return;
+                        }
+
                         err
                     }
 
@@ -1876,6 +1900,10 @@ impl<'v> Visitor<'v> for FindTypeParam {
 
     fn nested_visit_map(&mut self) -> hir::intravisit::NestedVisitorMap<Self::Map> {
         hir::intravisit::NestedVisitorMap::None
+    }
+
+    fn visit_where_predicate(&mut self, _: &'v hir::WherePredicate<'v>) {
+        // Skip where-clauses, to avoid suggesting indirection for type parameters found there.
     }
 
     fn visit_ty(&mut self, ty: &hir::Ty<'_>) {

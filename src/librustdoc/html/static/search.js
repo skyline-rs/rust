@@ -73,7 +73,7 @@ function removeEmptyStringsFromArray(x) {
  * Licensed under the Creative Commons Attribution-ShareAlike 3.0 Unported
  * Full License can be found at http://creativecommons.org/licenses/by-sa/3.0/legalcode
  * This code is an unmodified version of the code written by Marco de Wit
- * and was found at http://stackoverflow.com/a/18514751/745719
+ * and was found at https://stackoverflow.com/a/18514751/745719
  */
 var levenshtein_row2 = [];
 function levenshtein(s1, s2) {
@@ -1024,7 +1024,7 @@ window.initSearch = function(rawSearchIndex) {
                 var description = document.createElement("div");
                 description.className = "desc";
                 var spanDesc = document.createElement("span");
-                spanDesc.innerText = item.desc + "\u00A0";
+                spanDesc.insertAdjacentHTML("beforeend", item.desc);
 
                 description.appendChild(spanDesc);
                 wrapper.appendChild(description);
@@ -1442,6 +1442,10 @@ window.initSearch = function(rawSearchIndex) {
         if (selectCrate) {
             selectCrate.onchange = function() {
                 updateLocalStorage("rustdoc-saved-filter-crate", selectCrate.value);
+                // In case you "cut" the entry from the search input, then change the crate filter
+                // before paste back the previous search, you get the old search results without
+                // the filter. To prevent this, we need to remove the previous results.
+                currentResults = null;
                 search(undefined, true);
             };
         }

@@ -207,7 +207,7 @@ impl Command {
         // the remaining portion of this spawn in a mutex.
         //
         // For more information, msdn also has an article about this race:
-        // http://support.microsoft.com/kb/315939
+        // https://support.microsoft.com/kb/315939
         static CREATE_PROCESS_LOCK: StaticMutex = StaticMutex::new();
 
         let _guard = unsafe { CREATE_PROCESS_LOCK.lock() };
@@ -529,6 +529,12 @@ fn make_envp(maybe_env: Option<BTreeMap<EnvKey, OsString>>) -> io::Result<(*mut 
     // \0 to terminate.
     if let Some(env) = maybe_env {
         let mut blk = Vec::new();
+
+        // If there are no environment variables to set then signal this by
+        // pushing a null.
+        if env.is_empty() {
+            blk.push(0);
+        }
 
         for (k, v) in env {
             blk.extend(ensure_no_nuls(k.0)?.encode_wide());

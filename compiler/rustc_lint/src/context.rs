@@ -209,8 +209,8 @@ impl LintStore {
                 bug!("duplicate specification of lint {}", lint.name_lower())
             }
 
-            if let Some(FutureIncompatibleInfo { edition, .. }) = lint.future_incompatible {
-                if let Some(edition) = edition {
+            if let Some(FutureIncompatibleInfo { reason, .. }) = lint.future_incompatible {
+                if let Some(edition) = reason.edition() {
                     self.lint_groups
                         .entry(edition.lint_name())
                         .or_insert(LintGroup {
@@ -334,8 +334,14 @@ impl LintStore {
         }
     }
 
-    /// Checks the validity of lint names derived from the command line
-    pub fn check_lint_name_cmdline(&self, sess: &Session, lint_name: &str, level: Level) {
+    /// Checks the validity of lint names derived from the command line. Returns
+    /// true if the lint is valid, false otherwise.
+    pub fn check_lint_name_cmdline(
+        &self,
+        sess: &Session,
+        lint_name: &str,
+        level: Option<Level>,
+    ) -> bool {
         let db = match self.check_lint_name(lint_name, None) {
             CheckLintNameResult::Ok(_) => None,
             CheckLintNameResult::Warning(ref msg, _) => Some(sess.struct_warn(msg)),
@@ -361,18 +367,23 @@ impl LintStore {
         };
 
         if let Some(mut db) = db {
-            let msg = format!(
-                "requested on the command line with `{} {}`",
-                match level {
-                    Level::Allow => "-A",
-                    Level::Warn => "-W",
-                    Level::Deny => "-D",
-                    Level::Forbid => "-F",
-                },
-                lint_name
-            );
-            db.note(&msg);
+            if let Some(level) = level {
+                let msg = format!(
+                    "requested on the command line with `{} {}`",
+                    match level {
+                        Level::Allow => "-A",
+                        Level::Warn => "-W",
+                        Level::Deny => "-D",
+                        Level::Forbid => "-F",
+                    },
+                    lint_name
+                );
+                db.note(&msg);
+            }
             db.emit();
+            false
+        } else {
+            true
         }
     }
 
@@ -922,7 +933,7 @@ impl<'tcx> LateContext<'tcx> {
             }
 
             fn path_crate(self, cnum: CrateNum) -> Result<Self::Path, Self::Error> {
-                Ok(vec![self.tcx.original_crate_name(cnum)])
+                Ok(vec![self.tcx.crate_name(cnum)])
             }
 
             fn path_qualified(

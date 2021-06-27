@@ -30,6 +30,7 @@ Inline assembly is currently supported on the following architectures:
 - Hexagon
 - MIPS32r2 and MIPS64r2
 - wasm32
+- BPF
 
 ## Basic usage
 
@@ -455,7 +456,7 @@ reg_spec := <register class> / "<explicit register>"
 operand_expr := expr / "_" / expr "=>" expr / expr "=>" "_"
 reg_operand := dir_spec "(" reg_spec ")" operand_expr
 operand := reg_operand / "const" const_expr / "sym" path
-option := "pure" / "nomem" / "readonly" / "preserves_flags" / "noreturn" / "nostack" / "att_syntax"
+option := "pure" / "nomem" / "readonly" / "preserves_flags" / "noreturn" / "nostack" / "att_syntax" / "raw"
 options := "options(" option *["," option] [","] ")"
 asm := "asm!(" format_string *("," format_string) *("," [ident "="] operand) ["," options] [","] ")"
 ```
@@ -570,6 +571,8 @@ Here is the list of currently supported register classes:
 | PowerPC | `reg_nonzero` | | `r[1-31]` | `b` |
 | PowerPC | `freg` | `f[0-31]` | `f` |
 | wasm32 | `local` | None\* | `r` |
+| BPF | `reg` | `r[0-10]` | `r` |
+| BPF | `wreg` | `w[0-10]` | `w` |
 
 > **Note**: On x86 we treat `reg_byte` differently from `reg` because the compiler can allocate `al` and `ah` separately whereas `reg` reserves the whole register.
 >
@@ -615,6 +618,8 @@ Each register class has constraints on which value types they can be used with. 
 | PowerPC | `reg_nonzero` | None | `i8`, `i16`, `i32` |
 | PowerPC | `freg` | None | `f32`, `f64` |
 | wasm32 | `local` | None | `i8` `i16` `i32` `i64` `f32` `f64` |
+| BPF | `reg` | None | `i8` `i16` `i32` `i64` |
+| BPF | `wreg` | `alu32` | `i8` `i16` `i32` |
 
 > **Note**: For the purposes of the above table pointers, function pointers and `isize`/`usize` are treated as the equivalent integer type (`i16`/`i32`/`i64` depending on the target).
 
@@ -674,6 +679,7 @@ Some registers have multiple names. These are all treated by the compiler as ide
 | Hexagon | `r29` | `sp` |
 | Hexagon | `r30` | `fr` |
 | Hexagon | `r31` | `lr` |
+| BPF | `r[0-10]` | `w[0-10]` |
 
 Some registers cannot be used for input or output operands:
 
@@ -775,6 +781,7 @@ Currently the following options are defined:
 - `noreturn`: The `asm` block never returns, and its return type is defined as `!` (never). Behavior is undefined if execution falls through past the end of the asm code. A `noreturn` asm block behaves just like a function which doesn't return; notably, local variables in scope are not dropped before it is invoked.
 - `nostack`: The `asm` block does not push data to the stack, or write to the stack red-zone (if supported by the target). If this option is *not* used then the stack pointer is guaranteed to be suitably aligned (according to the target ABI) for a function call.
 - `att_syntax`: This option is only valid on x86, and causes the assembler to use the `.att_syntax prefix` mode of the GNU assembler. Register operands are substituted in with a leading `%`.
+- `raw`: This causes the template string to be parsed as a raw assembly string, with no special handling for `{` and `}`. This is primarily useful when including raw assembly code from an external file using `include_str!`.
 
 The compiler performs some additional checks on options:
 - The `nomem` and `readonly` options are mutually exclusive: it is a compile-time error to specify both.

@@ -1,13 +1,13 @@
 use std::cmp;
 
 use crate::ich::StableHashingContext;
-use rustc_data_structures::fx::FxHashMap;
+use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_errors::{DiagnosticBuilder, DiagnosticId};
 use rustc_hir::HirId;
 use rustc_session::lint::{
     builtin::{self, FORBIDDEN_LINT_GROUPS},
-    Level, Lint, LintId,
+    FutureIncompatibilityReason, Level, Lint, LintId,
 };
 use rustc_session::{DiagnosticMessageId, Session};
 use rustc_span::hygiene::MacroKind;
@@ -28,6 +28,9 @@ pub enum LintLevelSource {
     /// The provided `Level` is the level specified on the command line.
     /// (The actual level may be lower due to `--cap-lints`.)
     CommandLine(Symbol, Level),
+
+    /// Lint is being forced to warn no matter what.
+    ForceWarn(Symbol),
 }
 
 impl LintLevelSource {
@@ -36,6 +39,7 @@ impl LintLevelSource {
             LintLevelSource::Default => symbol::kw::Default,
             LintLevelSource::Node(name, _, _) => name,
             LintLevelSource::CommandLine(name, _) => name,
+            LintLevelSource::ForceWarn(name) => name,
         }
     }
 
@@ -44,6 +48,7 @@ impl LintLevelSource {
             LintLevelSource::Default => DUMMY_SP,
             LintLevelSource::Node(_, span, _) => span,
             LintLevelSource::CommandLine(_, _) => DUMMY_SP,
+            LintLevelSource::ForceWarn(_) => DUMMY_SP,
         }
     }
 }
@@ -55,6 +60,7 @@ pub type LevelAndSource = (Level, LintLevelSource);
 pub struct LintLevelSets {
     pub list: Vec<LintSet>,
     pub lint_cap: Level,
+    pub force_warns: FxHashSet<LintId>,
 }
 
 #[derive(Debug)]
@@ -73,7 +79,11 @@ pub enum LintSet {
 
 impl LintLevelSets {
     pub fn new() -> Self {
-        LintLevelSets { list: Vec::new(), lint_cap: Level::Forbid }
+        LintLevelSets {
+            list: Vec::new(),
+            lint_cap: Level::Forbid,
+            force_warns: FxHashSet::default(),
+        }
     }
 
     pub fn get_lint_level(
@@ -83,6 +93,11 @@ impl LintLevelSets {
         aux: Option<&FxHashMap<LintId, LevelAndSource>>,
         sess: &Session,
     ) -> LevelAndSource {
+        // Check whether we should always warn
+        if self.force_warns.contains(&LintId::of(lint)) {
+            return (Level::Warn, LintLevelSource::ForceWarn(Symbol::intern(lint.name)));
+        }
+
         let (level, mut src) = self.get_lint_id_level(LintId::of(lint), idx, aux);
 
         // If `level` is none then we actually assume the default level for this
@@ -176,11 +191,11 @@ impl LintLevelMap {
 impl<'a> HashStable<StableHashingContext<'a>> for LintLevelMap {
     #[inline]
     fn hash_stable(&self, hcx: &mut StableHashingContext<'a>, hasher: &mut StableHasher) {
-        let LintLevelMap { ref sets, ref id_to_set } = *self;
+        let LintLevelMap { ref sets, ref id_to_set, .. } = *self;
 
         id_to_set.hash_stable(hcx, hasher);
 
-        let LintLevelSets { ref list, lint_cap } = *sets;
+        let LintLevelSets { ref list, lint_cap, .. } = *sets;
 
         lint_cap.hash_stable(hcx, hasher);
 
@@ -277,7 +292,7 @@ pub fn struct_lint_level<'s, 'd>(
             // if this lint occurs in the expansion of a macro from an external crate,
             // allow individual lints to opt-out from being reported.
             let not_future_incompatible =
-                future_incompatible.map(|f| f.edition.is_some()).unwrap_or(true);
+                future_incompatible.map(|f| f.reason.edition().is_some()).unwrap_or(true);
             if not_future_incompatible && !lint.report_in_external_macro {
                 err.cancel();
                 // Don't continue further, since we don't want to have
@@ -346,14 +361,18 @@ pub fn struct_lint_level<'s, 'd>(
                     );
                 }
             }
+            LintLevelSource::ForceWarn(_) => {
+                sess.diag_note_once(
+                    &mut err,
+                    DiagnosticMessageId::from(lint),
+                    "warning forced by `force-warns` commandline option",
+                );
+            }
         }
 
         err.code(DiagnosticId::Lint { name, has_future_breakage });
 
         if let Some(future_incompatible) = future_incompatible {
-            const STANDARD_MESSAGE: &str = "this was previously accepted by the compiler but is being phased out; \
-                 it will become a hard error";
-
             let explanation = if lint_id == LintId::of(builtin::UNSTABLE_NAME_COLLISIONS) {
                 "once this associated item is added to the standard library, the ambiguity may \
                  cause an error or change in behavior!"
@@ -362,10 +381,22 @@ pub fn struct_lint_level<'s, 'd>(
                 "this borrowing pattern was not meant to be accepted, and may become a hard error \
                  in the future"
                     .to_owned()
-            } else if let Some(edition) = future_incompatible.edition {
-                format!("{} in the {} edition!", STANDARD_MESSAGE, edition)
+            } else if let FutureIncompatibilityReason::EditionError(edition) =
+                future_incompatible.reason
+            {
+                let current_edition = sess.edition();
+                format!(
+                    "this is accepted in the current edition (Rust {}) but is a hard error in Rust {}!",
+                    current_edition, edition
+                )
+            } else if let FutureIncompatibilityReason::EditionSemanticsChange(edition) =
+                future_incompatible.reason
+            {
+                format!("this changes meaning in Rust {}", edition)
             } else {
-                format!("{} in a future release!", STANDARD_MESSAGE)
+                "this was previously accepted by the compiler but is being phased out; \
+                 it will become a hard error in a future release!"
+                    .to_owned()
             };
             let citation = format!("for more information, see {}", future_incompatible.reference);
             err.warn(&explanation);

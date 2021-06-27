@@ -77,7 +77,7 @@ def download(path, url, probably_big, verbose):
 def _download(path, url, probably_big, verbose, exception):
     if probably_big or verbose:
         print("downloading {}".format(url))
-    # see http://serverfault.com/questions/301128/how-to-download
+    # see https://serverfault.com/questions/301128/how-to-download
     if sys.platform == 'win32':
         run(["PowerShell.exe", "/nologo", "-Command",
              "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12;",
@@ -648,18 +648,20 @@ class RustBuild(object):
         rev_parse = ["git", "rev-parse", "--show-toplevel"]
         top_level = subprocess.check_output(rev_parse, universal_newlines=True).strip()
         compiler = "{}/compiler/".format(top_level)
+        library = "{}/library/".format(top_level)
 
         # Look for a version to compare to based on the current commit.
         # Only commits merged by bors will have CI artifacts.
         merge_base = ["git", "log", "--author=bors", "--pretty=%H", "-n1"]
         commit = subprocess.check_output(merge_base, universal_newlines=True).strip()
 
-        # Warn if there were changes to the compiler since the ancestor commit.
-        status = subprocess.call(["git", "diff-index", "--quiet", commit, "--", compiler])
+        # Warn if there were changes to the compiler or standard library since the ancestor commit.
+        status = subprocess.call(["git", "diff-index", "--quiet", commit, "--", compiler, library])
         if status != 0:
             if download_rustc == "if-unchanged":
                 return None
-            print("warning: `download-rustc` is enabled, but there are changes to compiler/")
+            print("warning: `download-rustc` is enabled, but there are changes to \
+                   compiler/ or library/")
 
         if self.verbose:
             print("using downloaded stage1 artifacts from CI (commit {})".format(commit))
@@ -991,28 +993,20 @@ class RustBuild(object):
         ).decode(default_encoding).splitlines()]
         filtered_submodules = []
         submodules_names = []
-        llvm_checked_out = os.path.exists(os.path.join(self.rust_root, "src/llvm-project/.git"))
-        external_llvm_provided = self.get_toml('llvm-config') or self.downloading_llvm()
-        llvm_needed = not self.get_toml('codegen-backends', 'rust') \
-            or "llvm" in self.get_toml('codegen-backends', 'rust')
         for module in submodules:
+            # This is handled by native::Llvm in rustbuild, not here
             if module.endswith("llvm-project"):
-                # Don't sync the llvm-project submodule if an external LLVM was
-                # provided, if we are downloading LLVM or if the LLVM backend is
-                # not being built. Also, if the submodule has been initialized
-                # already, sync it anyways so that it doesn't mess up contributor
-                # pull requests.
-                if external_llvm_provided or not llvm_needed:
-                    if self.get_toml('lld') != 'true' and not llvm_checked_out:
-                        continue
+                continue
             check = self.check_submodule(module, slow_submodules)
             filtered_submodules.append((module, check))
             submodules_names.append(module)
         recorded = subprocess.Popen(["git", "ls-tree", "HEAD"] + submodules_names,
                                     cwd=self.rust_root, stdout=subprocess.PIPE)
         recorded = recorded.communicate()[0].decode(default_encoding).strip().splitlines()
+        # { filename: hash }
         recorded_submodules = {}
         for data in recorded:
+            # [mode, kind, hash, filename]
             data = data.split()
             recorded_submodules[data[3]] = data[2]
         for module in filtered_submodules:

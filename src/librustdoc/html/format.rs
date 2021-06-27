@@ -9,6 +9,7 @@ use std::cell::Cell;
 use std::fmt;
 use std::iter;
 
+use rustc_attr::{ConstStability, StabilityLevel};
 use rustc_data_structures::captures::Captures;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_hir as hir;
@@ -177,12 +178,22 @@ impl clean::GenericParamDef {
 
                 Ok(())
             }
-            clean::GenericParamDefKind::Const { ref ty, .. } => {
+            clean::GenericParamDefKind::Const { ref ty, ref default, .. } => {
                 if f.alternate() {
-                    write!(f, "const {}: {:#}", self.name, ty.print(cx))
+                    write!(f, "const {}: {:#}", self.name, ty.print(cx))?;
                 } else {
-                    write!(f, "const {}:&nbsp;{}", self.name, ty.print(cx))
+                    write!(f, "const {}:&nbsp;{}", self.name, ty.print(cx))?;
                 }
+
+                if let Some(default) = default {
+                    if f.alternate() {
+                        write!(f, " = {:#}", default)?;
+                    } else {
+                        write!(f, "&nbsp;=&nbsp;{}", default)?;
+                    }
+                }
+
+                Ok(())
             }
         })
     }
@@ -239,17 +250,33 @@ crate fn print_where_clause<'a, 'tcx: 'a>(
             }
 
             match pred {
-                clean::WherePredicate::BoundPredicate { ty, bounds } => {
+                clean::WherePredicate::BoundPredicate { ty, bounds, bound_params } => {
                     let bounds = bounds;
+                    let for_prefix = match bound_params.len() {
+                        0 => String::new(),
+                        _ if f.alternate() => {
+                            format!(
+                                "for<{:#}> ",
+                                comma_sep(bound_params.iter().map(|lt| lt.print()))
+                            )
+                        }
+                        _ => format!(
+                            "for&lt;{}&gt; ",
+                            comma_sep(bound_params.iter().map(|lt| lt.print()))
+                        ),
+                    };
+
                     if f.alternate() {
                         clause.push_str(&format!(
-                            "{:#}: {:#}",
+                            "{}{:#}: {:#}",
+                            for_prefix,
                             ty.print(cx),
                             print_generic_bounds(bounds, cx)
                         ));
                     } else {
                         clause.push_str(&format!(
-                            "{}: {}",
+                            "{}{}: {}",
+                            for_prefix,
                             ty.print(cx),
                             print_generic_bounds(bounds, cx)
                         ));
@@ -574,7 +601,7 @@ fn primitive_link(
                     f,
                     "<a class=\"primitive\" href=\"{}primitive.{}.html\">",
                     "../".repeat(len),
-                    prim.to_url_str()
+                    prim.as_sym()
                 )?;
                 needs_termination = true;
             }
@@ -603,7 +630,7 @@ fn primitive_link(
                         f,
                         "<a class=\"primitive\" href=\"{}/primitive.{}.html\">",
                         loc.join("/"),
-                        prim.to_url_str()
+                        prim.as_sym()
                     )?;
                     needs_termination = true;
                 }
@@ -620,18 +647,24 @@ fn primitive_link(
 
 /// Helper to render type parameters
 fn tybounds<'a, 'tcx: 'a>(
-    param_names: &'a Option<Vec<clean::GenericBound>>,
+    bounds: &'a Vec<clean::PolyTrait>,
+    lt: &'a Option<clean::Lifetime>,
     cx: &'a Context<'tcx>,
 ) -> impl fmt::Display + 'a + Captures<'tcx> {
-    display_fn(move |f| match *param_names {
-        Some(ref params) => {
-            for param in params {
+    display_fn(move |f| {
+        for (i, bound) in bounds.iter().enumerate() {
+            if i > 0 {
                 write!(f, " + ")?;
-                fmt::Display::fmt(&param.print(cx), f)?;
             }
-            Ok(())
+
+            fmt::Display::fmt(&bound.print(cx), f)?;
         }
-        None => Ok(()),
+
+        if let Some(lt) = lt {
+            write!(f, " + ")?;
+            fmt::Display::fmt(&lt.print(), f)?;
+        }
+        Ok(())
     })
 }
 
@@ -668,16 +701,16 @@ fn fmt_type<'cx>(
 
     match *t {
         clean::Generic(name) => write!(f, "{}", name),
-        clean::ResolvedPath { did, ref param_names, ref path, is_generic } => {
-            if param_names.is_some() {
-                f.write_str("dyn ")?;
-            }
+        clean::ResolvedPath { did, ref path, is_generic } => {
             // Paths like `T::Output` and `Self::Output` should be rendered with all segments.
-            resolved_path(f, did, path, is_generic, use_absolute, cx)?;
-            fmt::Display::fmt(&tybounds(param_names, cx), f)
+            resolved_path(f, did, path, is_generic, use_absolute, cx)
+        }
+        clean::DynTrait(ref bounds, ref lt) => {
+            f.write_str("dyn ")?;
+            fmt::Display::fmt(&tybounds(bounds, lt, cx), f)
         }
         clean::Infer => write!(f, "_"),
-        clean::Primitive(prim) => primitive_link(f, prim, prim.as_str(), cx),
+        clean::Primitive(prim) => primitive_link(f, prim, &*prim.as_sym().as_str(), cx),
         clean::BareFunction(ref decl) => {
             if f.alternate() {
                 write!(
@@ -809,7 +842,9 @@ fn fmt_type<'cx>(
                         }
                     }
                 }
-                clean::ResolvedPath { param_names: Some(ref v), .. } if !v.is_empty() => {
+                clean::DynTrait(ref bounds, ref trait_lt)
+                    if bounds.len() > 1 || trait_lt.is_some() =>
+                {
                     write!(f, "{}{}{}(", amp, lt, m)?;
                     fmt_type(&ty, f, use_absolute, cx)?;
                     write!(f, ")")
@@ -870,7 +905,7 @@ fn fmt_type<'cx>(
                 //        the ugliness comes from inlining across crates where
                 //        everything comes in as a fully resolved QPath (hard to
                 //        look at).
-                box clean::ResolvedPath { did, ref param_names, .. } => {
+                box clean::ResolvedPath { did, .. } => {
                     match href(did.into(), cx) {
                         Some((ref url, _, ref path)) if !f.alternate() => {
                             write!(
@@ -885,9 +920,6 @@ fn fmt_type<'cx>(
                         }
                         _ => write!(f, "{}", name)?,
                     }
-
-                    // FIXME: `param_names` are not rendered, and this seems bad?
-                    drop(param_names);
                     Ok(())
                 }
                 _ => write!(f, "{}", name),
@@ -1243,15 +1275,6 @@ impl PrintWithSpace for hir::Unsafety {
     }
 }
 
-impl PrintWithSpace for hir::Constness {
-    fn print_with_space(&self) -> &str {
-        match self {
-            hir::Constness::Const => "const ",
-            hir::Constness::NotConst => "",
-        }
-    }
-}
-
 impl PrintWithSpace for hir::IsAsync {
     fn print_with_space(&self) -> &str {
         match self {
@@ -1267,6 +1290,22 @@ impl PrintWithSpace for hir::Mutability {
             hir::Mutability::Not => "",
             hir::Mutability::Mut => "mut ",
         }
+    }
+}
+
+crate fn print_constness_with_space(
+    c: &hir::Constness,
+    s: Option<&ConstStability>,
+) -> &'static str {
+    match (c, s) {
+        // const stable or when feature(staged_api) is not set
+        (
+            hir::Constness::Const,
+            Some(ConstStability { level: StabilityLevel::Stable { .. }, .. }),
+        )
+        | (hir::Constness::Const, None) => "const ",
+        // const unstable or not const
+        _ => "",
     }
 }
 
