@@ -5,6 +5,8 @@ use crate::mem;
 use crate::ptr;
 use crate::sys::os;
 use crate::time::Duration;
+use crate::num::NonZeroUsize;
+use crate::sys::unsupported;
 
 use nnsdk::{os::SleepThread, TimeSpan};
 
@@ -146,4 +148,8 @@ pub mod guard {
 
 fn min_stack_size(_: *const libc::pthread_attr_t) -> usize {
     0x1000 // just a guess
+}
+
+pub fn available_concurrency() -> io::Result<NonZeroUsize> {
+    unsupported()
 }
