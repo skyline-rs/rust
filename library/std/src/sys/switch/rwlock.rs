@@ -4,6 +4,8 @@ pub struct RWLock {
     mode: UnsafeCell<isize>,
 }
 
+pub type MovableRWLock = Box<RWLock>;
+
 unsafe impl Send for RWLock {}
 unsafe impl Sync for RWLock {} // no threads on wasm
 
