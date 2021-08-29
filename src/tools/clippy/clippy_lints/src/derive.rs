@@ -1,7 +1,7 @@
 use clippy_utils::diagnostics::{span_lint_and_help, span_lint_and_note, span_lint_and_then};
 use clippy_utils::paths;
 use clippy_utils::ty::{implements_trait, is_copy};
-use clippy_utils::{get_trait_def_id, is_allowed, is_automatically_derived, match_def_path};
+use clippy_utils::{get_trait_def_id, is_automatically_derived, is_lint_allowed, match_def_path};
 use if_chain::if_chain;
 use rustc_hir::def_id::DefId;
 use rustc_hir::intravisit::{walk_expr, walk_fn, walk_item, FnKind, NestedVisitorMap, Visitor};
@@ -15,10 +15,12 @@ use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::source_map::Span;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for deriving `Hash` but implementing `PartialEq`
+    /// ### What it does
+    /// Checks for deriving `Hash` but implementing `PartialEq`
     /// explicitly or vice versa.
     ///
-    /// **Why is this bad?** The implementation of these traits must agree (for
+    /// ### Why is this bad?
+    /// The implementation of these traits must agree (for
     /// example for use with `HashMap`) so it’s probably a bad idea to use a
     /// default-generated `Hash` implementation with an explicitly defined
     /// `PartialEq`. In particular, the following must hold for any type:
@@ -27,9 +29,7 @@ declare_clippy_lint! {
     /// k1 == k2 ⇒ hash(k1) == hash(k2)
     /// ```
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```ignore
     /// #[derive(Hash)]
     /// struct Foo;
@@ -44,10 +44,12 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for deriving `Ord` but implementing `PartialOrd`
+    /// ### What it does
+    /// Checks for deriving `Ord` but implementing `PartialOrd`
     /// explicitly or vice versa.
     ///
-    /// **Why is this bad?** The implementation of these traits must agree (for
+    /// ### Why is this bad?
+    /// The implementation of these traits must agree (for
     /// example for use with `sort`) so it’s probably a bad idea to use a
     /// default-generated `Ord` implementation with an explicitly defined
     /// `PartialOrd`. In particular, the following must hold for any type
@@ -57,10 +59,7 @@ declare_clippy_lint! {
     /// k1.cmp(&k2) == k1.partial_cmp(&k2).unwrap()
     /// ```
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust,ignore
     /// #[derive(Ord, PartialEq, Eq)]
     /// struct Foo;
@@ -95,18 +94,21 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for explicit `Clone` implementations for `Copy`
+    /// ### What it does
+    /// Checks for explicit `Clone` implementations for `Copy`
     /// types.
     ///
-    /// **Why is this bad?** To avoid surprising behaviour, these traits should
+    /// ### Why is this bad?
+    /// To avoid surprising behaviour, these traits should
     /// agree and the behaviour of `Copy` cannot be overridden. In almost all
     /// situations a `Copy` type should have a `Clone` implementation that does
     /// nothing more than copy the object, which is what `#[derive(Copy, Clone)]`
     /// gets you.
     ///
-    /// **Known problems:** Bounds of generic types are sometimes wrong: https://github.com/rust-lang/rust/issues/26925
+    /// ### Known problems
+    /// Bounds of generic types are sometimes wrong: https://github.com/rust-lang/rust/issues/26925
     ///
-    /// **Example:**
+    /// ### Example
     /// ```rust,ignore
     /// #[derive(Copy)]
     /// struct Foo;
@@ -121,16 +123,15 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for deriving `serde::Deserialize` on a type that
+    /// ### What it does
+    /// Checks for deriving `serde::Deserialize` on a type that
     /// has methods using `unsafe`.
     ///
-    /// **Why is this bad?** Deriving `serde::Deserialize` will create a constructor
+    /// ### Why is this bad?
+    /// Deriving `serde::Deserialize` will create a constructor
     /// that may violate invariants hold by another constructor.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust,ignore
     /// use serde::Deserialize;
     ///
@@ -362,7 +363,7 @@ fn check_unsafe_derive_deserialize<'tcx>(
         if let ty::Adt(def, _) = ty.kind();
         if let Some(local_def_id) = def.did.as_local();
         let adt_hir_id = cx.tcx.hir().local_def_id_to_hir_id(local_def_id);
-        if !is_allowed(cx, UNSAFE_DERIVE_DESERIALIZE, adt_hir_id);
+        if !is_lint_allowed(cx, UNSAFE_DERIVE_DESERIALIZE, adt_hir_id);
         if cx.tcx.inherent_impls(def.did)
             .iter()
             .map(|imp_did| item_from_def_id(cx, *imp_did))
@@ -410,11 +411,8 @@ impl<'tcx> Visitor<'tcx> for UnsafeVisitor<'_, 'tcx> {
         }
 
         if let ExprKind::Block(block, _) = expr.kind {
-            match block.rules {
-                BlockCheckMode::UnsafeBlock(UnsafeSource::UserProvided) => {
-                    self.has_unsafe = true;
-                },
-                _ => {},
+            if let BlockCheckMode::UnsafeBlock(UnsafeSource::UserProvided) = block.rules {
+                self.has_unsafe = true;
             }
         }
 

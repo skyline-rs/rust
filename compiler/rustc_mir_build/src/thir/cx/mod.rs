@@ -30,6 +30,13 @@ crate fn thir_body<'tcx>(
     (tcx.alloc_steal_thir(cx.thir), expr)
 }
 
+crate fn thir_tree<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    owner_def: ty::WithOptConstParam<LocalDefId>,
+) -> String {
+    format!("{:#?}", thir_body(tcx, owner_def).0.steal())
+}
+
 struct Cx<'tcx> {
     tcx: TyCtxt<'tcx>,
     thir: Thir<'tcx>,
@@ -67,12 +74,6 @@ impl<'tcx> Cx<'tcx> {
 
         match self.tcx.at(sp).lit_to_const(LitToConstInput { lit, ty, neg }) {
             Ok(c) => c,
-            Err(LitToConstError::UnparseableFloat) => {
-                // FIXME(#31407) this is only necessary because float parsing is buggy
-                self.tcx.sess.span_err(sp, "could not evaluate float literal (see issue #31407)");
-                // create a dummy value and continue compiling
-                self.tcx.const_error(ty)
-            }
             Err(LitToConstError::Reported) => {
                 // create a dummy value and continue compiling
                 self.tcx.const_error(ty)

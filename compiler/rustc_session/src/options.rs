@@ -10,6 +10,7 @@ use rustc_target::spec::{RelocModel, RelroLevel, SplitDebuginfo, TargetTriple, T
 
 use rustc_feature::UnstableFeatures;
 use rustc_span::edition::Edition;
+use rustc_span::RealFileName;
 use rustc_span::SourceFileHashAlgorithm;
 
 use std::collections::BTreeMap;
@@ -133,9 +134,8 @@ top_level_options!(
         /// can influence whether overflow checks are done or not.
         debug_assertions: bool [TRACKED],
         debuginfo: DebugInfo [TRACKED],
-        lint_opts: Vec<(String, lint::Level)> [TRACKED],
-        lint_cap: Option<lint::Level> [TRACKED],
-        force_warns: Vec<String> [TRACKED],
+        lint_opts: Vec<(String, lint::Level)> [TRACKED_NO_CRATE_HASH],
+        lint_cap: Option<lint::Level> [TRACKED_NO_CRATE_HASH],
         describe_lints: bool [UNTRACKED],
         output_types: OutputTypes [TRACKED],
         search_paths: Vec<SearchPath> [UNTRACKED],
@@ -204,6 +204,9 @@ top_level_options!(
         json_unused_externs: bool [UNTRACKED],
 
         pretty: Option<PpMode> [UNTRACKED],
+
+        /// The (potentially remapped) working directory
+        working_dir: RealFileName [TRACKED],
     }
 );
 
@@ -685,7 +688,7 @@ mod parse {
             Some(v) => v,
         };
 
-        *slot = Some(match v.trim_end_matches("s") {
+        *slot = Some(match v.trim_end_matches('s') {
             "statement" | "stmt" => MirSpanview::Statement,
             "terminator" | "term" => MirSpanview::Terminator,
             "block" | "basicblock" => MirSpanview::Block,
@@ -1084,6 +1087,8 @@ options! {
         "set the optimization fuel quota for a crate"),
     function_sections: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "whether each function should go in its own section"),
+    future_incompat_test: bool = (false, parse_bool, [UNTRACKED],
+        "forces all lints to be future incompatible, used for internal testing (default: no)"),
     gcc_ld: Option<LdImpl> = (None, parse_gcc_ld, [TRACKED], "implementation of ld used by cc"),
     graphviz_dark_mode: bool = (false, parse_bool, [UNTRACKED],
         "use dark-themed colors in graphviz output (default: no)"),
@@ -1147,6 +1152,8 @@ options! {
         (default: no)"),
     mir_opt_level: Option<usize> = (None, parse_opt_number, [TRACKED],
         "MIR optimization level (0-4; default: 1 in non optimized builds and 2 in optimized builds)"),
+    move_size_limit: Option<usize> = (None, parse_opt_number, [TRACKED],
+        "the size at which the `large_assignments` lint starts to be emitted"),
     mutable_noalias: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "emit noalias metadata for mutable references (default: yes for LLVM >= 12, otherwise no)"),
     new_llvm_pass_manager: Option<bool> = (None, parse_opt_bool, [TRACKED],
@@ -1169,6 +1176,8 @@ options! {
         "compile without linking"),
     no_parallel_llvm: bool = (false, parse_no_flag, [UNTRACKED],
         "run LLVM in non-parallel mode (while keeping codegen-units and ThinLTO)"),
+    no_profiler_runtime: bool = (false, parse_no_flag, [TRACKED],
+        "prevent automatic injection of the profiler_builtins crate"),
     normalize_docs: bool = (false, parse_bool, [TRACKED],
         "normalize associated items in rustdoc when generating documentation"),
     osx_rpath_install_name: bool = (false, parse_bool, [TRACKED],
@@ -1177,6 +1186,9 @@ options! {
         "support compiling tests with panic=abort (default: no)"),
     parse_only: bool = (false, parse_bool, [UNTRACKED],
         "parse only; do not compile, assemble, or link (default: no)"),
+    partially_uninit_const_threshold: Option<usize> = (None, parse_opt_number, [TRACKED],
+        "allow generating const initializers with mixed init/uninit bytes, \
+        and set the maximum total size of a const allocation for which this is allowed (default: never)"),
     perf_stats: bool = (false, parse_bool, [UNTRACKED],
         "print some performance-related statistics (default: no)"),
     plt: Option<bool> = (None, parse_opt_bool, [TRACKED],
@@ -1209,11 +1221,13 @@ options! {
          "show backtraces for panics during proc-macro execution (default: no)"),
     profile: bool = (false, parse_bool, [TRACKED],
         "insert profiling code (default: no)"),
+    profile_closures: bool = (false, parse_no_flag, [UNTRACKED],
+        "profile size of closures"),
     profile_emit: Option<PathBuf> = (None, parse_opt_pathbuf, [TRACKED],
         "file path to emit profiling data at runtime when using 'profile' \
         (default based on relative source path)"),
-    profiler_runtime: Option<String> = (Some(String::from("profiler_builtins")), parse_opt_string, [TRACKED],
-        "name of the profiler runtime crate to automatically inject, or None to disable"),
+    profiler_runtime: String = (String::from("profiler_builtins"), parse_string, [TRACKED],
+        "name of the profiler runtime crate to automatically inject (default: `profiler_builtins`)"),
     query_dep_graph: bool = (false, parse_bool, [UNTRACKED],
         "enable queries of the dependency graph for regression testing (default: no)"),
     query_stats: bool = (false, parse_bool, [UNTRACKED],
@@ -1247,7 +1261,7 @@ options! {
         "specify the events recorded by the self profiler;
         for example: `-Z self-profile-events=default,query-keys`
         all options: none, all, default, generic-activity, query-provider, query-cache-hit
-                     query-blocked, incr-cache-load, query-keys, function-args, args, llvm"),
+                     query-blocked, incr-cache-load, incr-result-hashing, query-keys, function-args, args, llvm"),
     share_generics: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "make the current crate share its generic instantiations"),
     show_span: Option<String> = (None, parse_opt_string, [TRACKED],
@@ -1276,7 +1290,7 @@ options! {
     thinlto: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "enable ThinLTO when possible"),
     thir_unsafeck: bool = (false, parse_bool, [TRACKED],
-        "use the work-in-progress THIR unsafety checker. NOTE: this is unsound (default: no)"),
+        "use the THIR unsafety checker (default: no)"),
     /// We default to 1 here since we want to behave like
     /// a sequential compiler for now. This'll likely be adjusted
     /// in the future. Note that -Zthreads=0 is the way to get
@@ -1305,7 +1319,7 @@ options! {
         "take the brakes off const evaluation. NOTE: this is unsound (default: no)"),
     unpretty: Option<String> = (None, parse_unpretty, [UNTRACKED],
         "present the input source, unstable (and less-pretty) variants;
-        valid types are any of the types for `--pretty`, as well as:
+        `normal`, `identified`,
         `expanded`, `expanded,identified`,
         `expanded,hygiene` (with internal representations),
         `everybody_loops` (all function bodies replaced with `loop {}`),

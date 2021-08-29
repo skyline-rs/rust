@@ -185,15 +185,13 @@ impl fmt::Debug for VarsOs {
 ///
 /// # Errors
 ///
-/// Errors if the environment variable is not present.
-/// Errors if the environment variable is not valid Unicode. If this is not desired, consider using
-/// [`var_os`].
+/// This function will return an error if the environment variable isn't set.
 ///
-/// # Panics
+/// This function may return an error if the environment variable's name contains
+/// the equal sign character (`=`) or the NUL character.
 ///
-/// This function may panic if `key` is empty, contains an ASCII equals sign
-/// `'='` or the NUL character `'\0'`, or when the value contains the NUL
-/// character.
+/// This function will return an error if the environment variable's value is
+/// not valid Unicode. If this is not desired, consider using [`var_os`].
 ///
 /// # Examples
 ///
@@ -219,17 +217,21 @@ fn _var(key: &OsStr) -> Result<String, VarError> {
 }
 
 /// Fetches the environment variable `key` from the current process, returning
-/// [`None`] if the variable isn't set.
-///
-/// # Panics
-///
-/// This function may panic if `key` is empty, contains an ASCII equals sign
-/// `'='` or the NUL character `'\0'`, or when the value contains the NUL
-/// character.
+/// [`None`] if the variable isn't set or there's another error.
 ///
 /// Note that the method will not check if the environment variable
 /// is valid Unicode. If you want to have an error on invalid UTF-8,
 /// use the [`var`] function instead.
+///
+/// # Errors
+///
+/// This function returns an error if the environment variable isn't set.
+///
+/// This function may return an error if the environment variable's name contains
+/// the equal sign character (`=`) or the NUL character.
+///
+/// This function may return an error if the environment variable's value contains
+/// the NUL character.
 ///
 /// # Examples
 ///
@@ -249,7 +251,6 @@ pub fn var_os<K: AsRef<OsStr>>(key: K) -> Option<OsString> {
 
 fn _var_os(key: &OsStr) -> Option<OsString> {
     os_imp::getenv(key)
-        .unwrap_or_else(|e| panic!("failed to get environment variable `{:?}`: {}", key, e))
 }
 
 /// The error type for operations interacting with environment variables.
@@ -294,7 +295,7 @@ impl Error for VarError {
     }
 }
 
-/// Sets the environment variable `k` to the value `v` for the currently running
+/// Sets the environment variable `key` to the value `value` for the currently running
 /// process.
 ///
 /// Note that while concurrent access to environment variables is safe in Rust,
@@ -310,9 +311,8 @@ impl Error for VarError {
 ///
 /// # Panics
 ///
-/// This function may panic if `key` is empty, contains an ASCII equals sign
-/// `'='` or the NUL character `'\0'`, or when the value contains the NUL
-/// character.
+/// This function may panic if `key` is empty, contains an ASCII equals sign `'='`
+/// or the NUL character `'\0'`, or when `value` contains the NUL character.
 ///
 /// # Examples
 ///
@@ -683,7 +683,7 @@ pub fn current_exe() -> io::Result<PathBuf> {
 /// for more.
 ///
 /// The first element is traditionally the path of the executable, but it can be
-/// set to arbitrary text, and may not even exist. This means this property
+/// set to arbitrary text, and might not even exist. This means this property
 /// should not be relied upon for security purposes.
 ///
 /// [`env::args()`]: args
@@ -699,7 +699,7 @@ pub struct Args {
 /// for more.
 ///
 /// The first element is traditionally the path of the executable, but it can be
-/// set to arbitrary text, and may not even exist. This means this property
+/// set to arbitrary text, and might not even exist. This means this property
 /// should not be relied upon for security purposes.
 ///
 /// [`env::args_os()`]: args_os
@@ -712,7 +712,7 @@ pub struct ArgsOs {
 /// via the command line).
 ///
 /// The first element is traditionally the path of the executable, but it can be
-/// set to arbitrary text, and may not even exist. This means this property should
+/// set to arbitrary text, and might not even exist. This means this property should
 /// not be relied upon for security purposes.
 ///
 /// On Unix systems the shell usually expands unquoted arguments with glob patterns
@@ -749,7 +749,7 @@ pub fn args() -> Args {
 /// via the command line).
 ///
 /// The first element is traditionally the path of the executable, but it can be
-/// set to arbitrary text, and may not even exist. This means this property should
+/// set to arbitrary text, and might not even exist. This means this property should
 /// not be relied upon for security purposes.
 ///
 /// On Unix systems the shell usually expands unquoted arguments with glob patterns

@@ -1,6 +1,6 @@
 // force-host
 
-#![feature(plugin_registrar, rustc_private)]
+#![feature(rustc_private)]
 #![feature(box_syntax)]
 
 extern crate rustc_driver;
@@ -33,7 +33,7 @@ macro_rules! fake_lint_pass {
                     if !cx.sess().contains_name(attrs, $attr) {
                         cx.lint(CRATE_NOT_OKAY, |lint| {
                              let msg = format!("crate is not marked with #![{}]", $attr);
-                             lint.build(&msg).set_span(krate.item.inner).emit()
+                             lint.build(&msg).set_span(krate.module().inner).emit()
                         });
                     }
                 )*
@@ -64,8 +64,8 @@ fake_lint_pass! {
     Symbol::intern("crate_grey"), Symbol::intern("crate_green")
 }
 
-#[plugin_registrar]
-pub fn plugin_registrar(reg: &mut Registry) {
+#[no_mangle]
+fn __rustc_plugin_registrar(reg: &mut Registry) {
     reg.lint_store.register_lints(&[
         &CRATE_NOT_OKAY,
         &CRATE_NOT_RED,

@@ -29,7 +29,7 @@ pub struct Diagnostic {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Encodable, Decodable)]
 pub enum DiagnosticId {
     Error(String),
-    Lint { name: String, has_future_breakage: bool },
+    Lint { name: String, has_future_breakage: bool, is_force_warn: bool },
 }
 
 /// A "sub"-diagnostic attached to a parent diagnostic.
@@ -105,6 +105,13 @@ impl Diagnostic {
     pub fn has_future_breakage(&self) -> bool {
         match self.code {
             Some(DiagnosticId::Lint { has_future_breakage, .. }) => has_future_breakage,
+            _ => false,
+        }
+    }
+
+    pub fn is_force_warn(&self) -> bool {
+        match self.code {
+            Some(DiagnosticId::Lint { is_force_warn, .. }) => is_force_warn,
             _ => false,
         }
     }
@@ -437,6 +444,30 @@ impl Diagnostic {
         self
     }
 
+    /// Prints out a message with multiple suggested edits of the code.
+    /// See also [`Diagnostic::span_suggestion()`].
+    pub fn multipart_suggestions(
+        &mut self,
+        msg: &str,
+        suggestions: impl Iterator<Item = Vec<(Span, String)>>,
+        applicability: Applicability,
+    ) -> &mut Self {
+        self.suggestions.push(CodeSuggestion {
+            substitutions: suggestions
+                .map(|sugg| Substitution {
+                    parts: sugg
+                        .into_iter()
+                        .map(|(span, snippet)| SubstitutionPart { snippet, span })
+                        .collect(),
+                })
+                .collect(),
+            msg: msg.to_owned(),
+            style: SuggestionStyle::ShowCode,
+            applicability,
+            tool_metadata: Default::default(),
+        });
+        self
+    }
     /// Prints out a message with a suggested edit of the code. If the suggestion is presented
     /// inline, it will only show the message and not the suggestion.
     ///

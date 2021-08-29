@@ -1,4 +1,3 @@
-// ignore-tidy-filelength
 use crate::ich::StableHashingContext;
 use crate::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use crate::mir::{GeneratorLayout, GeneratorSavedLocal};
@@ -43,6 +42,7 @@ pub trait IntegerExt {
 }
 
 impl IntegerExt for Integer {
+    #[inline]
     fn to_ty<'tcx>(&self, tcx: TyCtxt<'tcx>, signed: bool) -> Ty<'tcx> {
         match (*self, signed) {
             (I8, false) => tcx.types.u8,
@@ -113,9 +113,6 @@ impl IntegerExt for Integer {
         let unsigned_fit = Integer::fit_unsigned(cmp::max(min as u128, max as u128));
         let signed_fit = cmp::max(Integer::fit_signed(min), Integer::fit_signed(max));
 
-        let mut min_from_extern = None;
-        let min_default = I8;
-
         if let Some(ity) = repr.int {
             let discr = Integer::from_attr(&tcx, ity);
             let fit = if ity.is_signed() { signed_fit } else { unsigned_fit };
@@ -129,19 +126,14 @@ impl IntegerExt for Integer {
             return (discr, ity.is_signed());
         }
 
-        if repr.c() {
-            match &tcx.sess.target.arch[..] {
-                "hexagon" => min_from_extern = Some(I8),
-                // WARNING: the ARM EABI has two variants; the one corresponding
-                // to `at_least == I32` appears to be used on Linux and NetBSD,
-                // but some systems may use the variant corresponding to no
-                // lower bound. However, we don't run on those yet...?
-                "arm" => min_from_extern = Some(I32),
-                _ => min_from_extern = Some(I32),
-            }
-        }
-
-        let at_least = min_from_extern.unwrap_or(min_default);
+        let at_least = if repr.c() {
+            // This is usually I32, however it can be different on some platforms,
+            // notably hexagon and arm-none/thumb-none
+            tcx.data_layout().c_enum_min_size
+        } else {
+            // repr(Rust) enums try to be as small as possible
+            I8
+        };
 
         // If there are no negative values, we can use the unsigned fit.
         if min >= 0 {
@@ -158,6 +150,7 @@ pub trait PrimitiveExt {
 }
 
 impl PrimitiveExt for Primitive {
+    #[inline]
     fn to_ty<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
         match *self {
             Int(i, signed) => i.to_ty(tcx, signed),
@@ -169,6 +162,7 @@ impl PrimitiveExt for Primitive {
 
     /// Return an *integer* type matching this primitive.
     /// Useful in particular when dealing with enum discriminants.
+    #[inline]
     fn to_int_ty(&self, tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
         match *self {
             Int(i, signed) => i.to_ty(tcx, signed),
@@ -214,14 +208,14 @@ impl<'tcx> fmt::Display for LayoutError<'tcx> {
     }
 }
 
-fn layout_raw<'tcx>(
+fn layout_of<'tcx>(
     tcx: TyCtxt<'tcx>,
     query: ty::ParamEnvAnd<'tcx, Ty<'tcx>>,
-) -> Result<&'tcx Layout, LayoutError<'tcx>> {
+) -> Result<TyAndLayout<'tcx>, LayoutError<'tcx>> {
     ty::tls::with_related_context(tcx, move |icx| {
         let (param_env, ty) = query.into_parts();
 
-        if !tcx.sess.recursion_limit().value_within_limit(icx.layout_depth) {
+        if !tcx.recursion_limit().value_within_limit(icx.layout_depth) {
             tcx.sess.fatal(&format!("overflow representing the type `{}`", ty));
         }
 
@@ -229,21 +223,33 @@ fn layout_raw<'tcx>(
         let icx = ty::tls::ImplicitCtxt { layout_depth: icx.layout_depth + 1, ..icx.clone() };
 
         ty::tls::enter_context(&icx, |_| {
-            let cx = LayoutCx { tcx, param_env };
-            let layout = cx.layout_raw_uncached(ty);
-            // Type-level uninhabitedness should always imply ABI uninhabitedness.
-            if let Ok(layout) = layout {
-                if tcx.conservative_is_privately_uninhabited(param_env.and(ty)) {
-                    assert!(layout.abi.is_uninhabited());
-                }
+            let param_env = param_env.with_reveal_all_normalized(tcx);
+            let unnormalized_ty = ty;
+            let ty = tcx.normalize_erasing_regions(param_env, ty);
+            if ty != unnormalized_ty {
+                // Ensure this layout is also cached for the normalized type.
+                return tcx.layout_of(param_env.and(ty));
             }
-            layout
+
+            let cx = LayoutCx { tcx, param_env };
+
+            let layout = cx.layout_of_uncached(ty)?;
+            let layout = TyAndLayout { ty, layout };
+
+            cx.record_layout_for_printing(layout);
+
+            // Type-level uninhabitedness should always imply ABI uninhabitedness.
+            if tcx.conservative_is_privately_uninhabited(param_env.and(ty)) {
+                assert!(layout.abi.is_uninhabited());
+            }
+
+            Ok(layout)
         })
     })
 }
 
 pub fn provide(providers: &mut ty::query::Providers) {
-    *providers = ty::query::Providers { layout_raw, ..*providers };
+    *providers = ty::query::Providers { layout_of, ..*providers };
 }
 
 pub struct LayoutCx<'tcx, C> {
@@ -312,7 +318,8 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
         let dl = self.data_layout();
         let pack = repr.pack;
         if pack.is_some() && repr.align.is_some() {
-            bug!("struct cannot be packed and aligned");
+            self.tcx.sess.delay_span_bug(DUMMY_SP, "struct cannot be packed and aligned");
+            return Err(LayoutError::Unknown(ty));
         }
 
         let mut align = if pack.is_some() { dl.i8_align } else { dl.aggregate_align };
@@ -500,14 +507,14 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
         })
     }
 
-    fn layout_raw_uncached(&self, ty: Ty<'tcx>) -> Result<&'tcx Layout, LayoutError<'tcx>> {
+    fn layout_of_uncached(&self, ty: Ty<'tcx>) -> Result<&'tcx Layout, LayoutError<'tcx>> {
         let tcx = self.tcx;
         let param_env = self.param_env;
         let dl = self.data_layout();
         let scalar_unit = |value: Primitive| {
             let bits = value.size(dl).bits();
             assert!(bits <= 128);
-            Scalar { value, valid_range: 0..=(!0 >> (128 - bits)) }
+            Scalar { value, valid_range: WrappingRange { start: 0, end: (!0 >> (128 - bits)) } }
         };
         let scalar = |value: Primitive| tcx.intern_layout(Layout::scalar(self, scalar_unit(value)));
 
@@ -520,11 +527,14 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
             // Basic scalars.
             ty::Bool => tcx.intern_layout(Layout::scalar(
                 self,
-                Scalar { value: Int(I8, false), valid_range: 0..=1 },
+                Scalar { value: Int(I8, false), valid_range: WrappingRange { start: 0, end: 1 } },
             )),
             ty::Char => tcx.intern_layout(Layout::scalar(
                 self,
-                Scalar { value: Int(I32, false), valid_range: 0..=0x10FFFF },
+                Scalar {
+                    value: Int(I32, false),
+                    valid_range: WrappingRange { start: 0, end: 0x10FFFF },
+                },
             )),
             ty::Int(ity) => scalar(Int(Integer::from_int_ty(dl, ity), true)),
             ty::Uint(ity) => scalar(Int(Integer::from_uint_ty(dl, ity), false)),
@@ -534,7 +544,7 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
             }),
             ty::FnPtr(_) => {
                 let mut ptr = scalar_unit(Pointer);
-                ptr.valid_range = 1..=*ptr.valid_range.end();
+                ptr.valid_range = ptr.valid_range.with_start(1);
                 tcx.intern_layout(Layout::scalar(self, ptr))
             }
 
@@ -552,7 +562,7 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
             ty::Ref(_, pointee, _) | ty::RawPtr(ty::TypeAndMut { ty: pointee, .. }) => {
                 let mut data_ptr = scalar_unit(Pointer);
                 if !ty.is_unsafe_ptr() {
-                    data_ptr.valid_range = 1..=*data_ptr.valid_range.end();
+                    data_ptr.valid_range = data_ptr.valid_range.with_start(1);
                 }
 
                 let pointee = tcx.normalize_erasing_regions(param_env, pointee);
@@ -568,7 +578,7 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
                     ty::Slice(_) | ty::Str => scalar_unit(Int(dl.ptr_sized_integer(), false)),
                     ty::Dynamic(..) => {
                         let mut vtable = scalar_unit(Pointer);
-                        vtable.valid_range = 1..=*vtable.valid_range.end();
+                        vtable.valid_range = vtable.valid_range.with_start(1);
                         vtable
                     }
                     _ => return Err(LayoutError::Unknown(unsized_part)),
@@ -808,7 +818,11 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
 
                 if def.is_union() {
                     if def.repr.pack.is_some() && def.repr.align.is_some() {
-                        bug!("union cannot be packed and aligned");
+                        self.tcx.sess.delay_span_bug(
+                            tcx.def_span(def.did),
+                            "union cannot be packed and aligned",
+                        );
+                        return Err(LayoutError::Unknown(ty));
                     }
 
                     let mut align =
@@ -890,7 +904,9 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
                 let present_first = match present_first {
                     Some(present_first) => present_first,
                     // Uninhabited because it has no variants, or only absent ones.
-                    None if def.is_enum() => return tcx.layout_raw(param_env.and(tcx.types.never)),
+                    None if def.is_enum() => {
+                        return Ok(tcx.layout_of(param_env.and(tcx.types.never))?.layout);
+                    }
                     // If it's a struct, still compute a layout so that we can still compute the
                     // field offsets.
                     None => VariantIdx::new(0),
@@ -937,14 +953,14 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
                             if let Bound::Included(start) = start {
                                 // FIXME(eddyb) this might be incorrect - it doesn't
                                 // account for wrap-around (end < start) ranges.
-                                assert!(*scalar.valid_range.start() <= start);
-                                scalar.valid_range = start..=*scalar.valid_range.end();
+                                assert!(scalar.valid_range.start <= start);
+                                scalar.valid_range.start = start;
                             }
                             if let Bound::Included(end) = end {
                                 // FIXME(eddyb) this might be incorrect - it doesn't
                                 // account for wrap-around (end < start) ranges.
-                                assert!(*scalar.valid_range.end() >= end);
-                                scalar.valid_range = *scalar.valid_range.start()..=end;
+                                assert!(scalar.valid_range.end >= end);
+                                scalar.valid_range.end = end;
                             }
 
                             // Update `largest_niche` if we have introduced a larger niche.
@@ -1260,7 +1276,10 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
                 let tag_mask = !0u128 >> (128 - ity.size().bits());
                 let tag = Scalar {
                     value: Int(ity, signed),
-                    valid_range: (min as u128 & tag_mask)..=(max as u128 & tag_mask),
+                    valid_range: WrappingRange {
+                        start: (min as u128 & tag_mask),
+                        end: (max as u128 & tag_mask),
+                    },
                 };
                 let mut abi = Abi::Aggregate { sized: true };
                 if tag.value.size(dl) == size {
@@ -1366,11 +1385,9 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
 
             // Types with no meaningful known layout.
             ty::Projection(_) | ty::Opaque(..) => {
-                let normalized = tcx.normalize_erasing_regions(param_env, ty);
-                if ty == normalized {
-                    return Err(LayoutError::Unknown(ty));
-                }
-                tcx.layout_raw(param_env.and(normalized))?
+                // NOTE(eddyb) `layout_of` query should've normalized these away,
+                // if that was possible, so there's no reason to try again here.
+                return Err(LayoutError::Unknown(ty));
             }
 
             ty::Placeholder(..) | ty::GeneratorWitness(..) | ty::Infer(_) => {
@@ -1539,7 +1556,10 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
         let max_discr = (info.variant_fields.len() - 1) as u128;
         let discr_int = Integer::fit_unsigned(max_discr);
         let discr_int_ty = discr_int.to_ty(tcx, false);
-        let tag = Scalar { value: Primitive::Int(discr_int, false), valid_range: 0..=max_discr };
+        let tag = Scalar {
+            value: Primitive::Int(discr_int, false),
+            valid_range: WrappingRange { start: 0, end: max_discr },
+        };
         let tag_layout = self.tcx.intern_layout(Layout::scalar(self, tag.clone()));
         let tag_layout = TyAndLayout { ty: discr_int_ty, layout: tag_layout };
 
@@ -1707,7 +1727,7 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
         Ok(layout)
     }
 
-    /// This is invoked by the `layout_raw` query to record the final
+    /// This is invoked by the `layout_of` query to record the final
     /// layout of each type.
     #[inline(always)]
     fn record_layout_for_printing(&self, layout: TyAndLayout<'tcx>) {
@@ -1722,7 +1742,9 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
         // Ignore layouts that are done with non-empty environments or
         // non-monomorphic layouts, as the user only wants to see the stuff
         // resulting from the final codegen session.
-        if layout.ty.has_param_types_or_consts() || !self.param_env.caller_bounds().is_empty() {
+        if layout.ty.definitely_has_param_types_or_consts(self.tcx)
+            || !self.param_env.caller_bounds().is_empty()
+        {
             return;
         }
 
@@ -1889,7 +1911,7 @@ impl<'tcx> SizeSkeleton<'tcx> {
                 let tail = tcx.struct_tail_erasing_lifetimes(pointee, param_env);
                 match tail.kind() {
                     ty::Param(_) | ty::Projection(_) => {
-                        debug_assert!(tail.has_param_types_or_consts());
+                        debug_assert!(tail.definitely_has_param_types_or_consts(tcx));
                         Ok(SizeSkeleton::Pointer { non_zero, tail: tcx.erase_regions(tail) })
                     }
                     _ => bug!(
@@ -1999,12 +2021,14 @@ pub trait HasParamEnv<'tcx> {
 }
 
 impl<'tcx> HasDataLayout for TyCtxt<'tcx> {
+    #[inline]
     fn data_layout(&self) -> &TargetDataLayout {
         &self.data_layout
     }
 }
 
 impl<'tcx> HasTyCtxt<'tcx> for TyCtxt<'tcx> {
+    #[inline]
     fn tcx(&self) -> TyCtxt<'tcx> {
         *self
     }
@@ -2035,22 +2059,10 @@ impl<'tcx> LayoutOf for LayoutCx<'tcx, TyCtxt<'tcx>> {
     type TyAndLayout = Result<TyAndLayout<'tcx>, LayoutError<'tcx>>;
 
     /// Computes the layout of a type. Note that this implicitly
-    /// executes in "reveal all" mode.
+    /// executes in "reveal all" mode, and will normalize the input type.
+    #[inline]
     fn layout_of(&self, ty: Ty<'tcx>) -> Self::TyAndLayout {
-        let param_env = self.param_env.with_reveal_all_normalized(self.tcx);
-        let ty = self.tcx.normalize_erasing_regions(param_env, ty);
-        let layout = self.tcx.layout_raw(param_env.and(ty))?;
-        let layout = TyAndLayout { ty, layout };
-
-        // N.B., this recording is normally disabled; when enabled, it
-        // can however trigger recursive invocations of `layout_of`.
-        // Therefore, we execute it *after* the main query has
-        // completed, to avoid problems around recursive structures
-        // and the like. (Admittedly, I wasn't able to reproduce a problem
-        // here, but it seems like the right thing to do. -nmatsakis)
-        self.record_layout_for_printing(layout);
-
-        Ok(layout)
+        self.tcx.layout_of(self.param_env.and(ty))
     }
 }
 
@@ -2059,50 +2071,10 @@ impl LayoutOf for LayoutCx<'tcx, ty::query::TyCtxtAt<'tcx>> {
     type TyAndLayout = Result<TyAndLayout<'tcx>, LayoutError<'tcx>>;
 
     /// Computes the layout of a type. Note that this implicitly
-    /// executes in "reveal all" mode.
+    /// executes in "reveal all" mode, and will normalize the input type.
+    #[inline]
     fn layout_of(&self, ty: Ty<'tcx>) -> Self::TyAndLayout {
-        let param_env = self.param_env.with_reveal_all_normalized(*self.tcx);
-        let ty = self.tcx.normalize_erasing_regions(param_env, ty);
-        let layout = self.tcx.layout_raw(param_env.and(ty))?;
-        let layout = TyAndLayout { ty, layout };
-
-        // N.B., this recording is normally disabled; when enabled, it
-        // can however trigger recursive invocations of `layout_of`.
-        // Therefore, we execute it *after* the main query has
-        // completed, to avoid problems around recursive structures
-        // and the like. (Admittedly, I wasn't able to reproduce a problem
-        // here, but it seems like the right thing to do. -nmatsakis)
-        let cx = LayoutCx { tcx: *self.tcx, param_env: self.param_env };
-        cx.record_layout_for_printing(layout);
-
-        Ok(layout)
-    }
-}
-
-// Helper (inherent) `layout_of` methods to avoid pushing `LayoutCx` to users.
-impl TyCtxt<'tcx> {
-    /// Computes the layout of a type. Note that this implicitly
-    /// executes in "reveal all" mode.
-    #[inline]
-    pub fn layout_of(
-        self,
-        param_env_and_ty: ty::ParamEnvAnd<'tcx, Ty<'tcx>>,
-    ) -> Result<TyAndLayout<'tcx>, LayoutError<'tcx>> {
-        let cx = LayoutCx { tcx: self, param_env: param_env_and_ty.param_env };
-        cx.layout_of(param_env_and_ty.value)
-    }
-}
-
-impl ty::query::TyCtxtAt<'tcx> {
-    /// Computes the layout of a type. Note that this implicitly
-    /// executes in "reveal all" mode.
-    #[inline]
-    pub fn layout_of(
-        self,
-        param_env_and_ty: ty::ParamEnvAnd<'tcx, Ty<'tcx>>,
-    ) -> Result<TyAndLayout<'tcx>, LayoutError<'tcx>> {
-        let cx = LayoutCx { tcx: self.at(self.span), param_env: param_env_and_ty.param_env };
-        cx.layout_of(param_env_and_ty.value)
+        self.tcx.layout_of(self.param_env.and(ty))
     }
 }
 
@@ -2451,6 +2423,7 @@ where
 }
 
 impl<'a, 'tcx> HashStable<StableHashingContext<'a>> for LayoutError<'tcx> {
+    #[inline]
     fn hash_stable(&self, hcx: &mut StableHashingContext<'a>, hasher: &mut StableHasher) {
         use crate::ty::layout::LayoutError::*;
         mem::discriminant(self).hash_stable(hcx, hasher);
@@ -2574,14 +2547,14 @@ where
     /// Compute a `FnAbi` suitable for indirect calls, i.e. to `fn` pointers.
     ///
     /// NB: this doesn't handle virtual calls - those should use `FnAbi::of_instance`
-    /// instead, where the instance is a `InstanceDef::Virtual`.
+    /// instead, where the instance is an `InstanceDef::Virtual`.
     fn of_fn_ptr(cx: &C, sig: ty::PolyFnSig<'tcx>, extra_args: &[Ty<'tcx>]) -> Self;
 
     /// Compute a `FnAbi` suitable for declaring/defining an `fn` instance, and for
     /// direct calls to an `fn`.
     ///
     /// NB: that includes virtual calls, which are represented by "direct calls"
-    /// to a `InstanceDef::Virtual` instance (of `<dyn Trait as Trait>::fn`).
+    /// to an `InstanceDef::Virtual` instance (of `<dyn Trait as Trait>::fn`).
     fn of_instance(cx: &C, instance: ty::Instance<'tcx>, extra_args: &[Ty<'tcx>]) -> Self;
 
     fn new_internal(
@@ -2595,68 +2568,129 @@ where
     fn adjust_for_abi(&mut self, cx: &C, abi: SpecAbi);
 }
 
+/// Calculates whether a function's ABI can unwind or not.
+///
+/// This takes two primary parameters:
+///
+/// * `codegen_fn_attr_flags` - these are flags calculated as part of the
+///   codegen attrs for a defined function. For function pointers this set of
+///   flags is the empty set. This is only applicable for Rust-defined
+///   functions, and generally isn't needed except for small optimizations where
+///   we try to say a function which otherwise might look like it could unwind
+///   doesn't actually unwind (such as for intrinsics and such).
+///
+/// * `abi` - this is the ABI that the function is defined with. This is the
+///   primary factor for determining whether a function can unwind or not.
+///
+/// Note that in this case unwinding is not necessarily panicking in Rust. Rust
+/// panics are implemented with unwinds on most platform (when
+/// `-Cpanic=unwind`), but this also accounts for `-Cpanic=abort` build modes.
+/// Notably unwinding is disallowed for more non-Rust ABIs unless it's
+/// specifically in the name (e.g. `"C-unwind"`). Unwinding within each ABI is
+/// defined for each ABI individually, but it always corresponds to some form of
+/// stack-based unwinding (the exact mechanism of which varies
+/// platform-by-platform).
+///
+/// Rust functions are classfied whether or not they can unwind based on the
+/// active "panic strategy". In other words Rust functions are considered to
+/// unwind in `-Cpanic=unwind` mode and cannot unwind in `-Cpanic=abort` mode.
+/// Note that Rust supports intermingling panic=abort and panic=unwind code, but
+/// only if the final panic mode is panic=abort. In this scenario any code
+/// previously compiled assuming that a function can unwind is still correct, it
+/// just never happens to actually unwind at runtime.
+///
+/// This function's answer to whether or not a function can unwind is quite
+/// impactful throughout the compiler. This affects things like:
+///
+/// * Calling a function which can't unwind means codegen simply ignores any
+///   associated unwinding cleanup.
+/// * Calling a function which can unwind from a function which can't unwind
+///   causes the `abort_unwinding_calls` MIR pass to insert a landing pad that
+///   aborts the process.
+/// * This affects whether functions have the LLVM `nounwind` attribute, which
+///   affects various optimizations and codegen.
+///
+/// FIXME: this is actually buggy with respect to Rust functions. Rust functions
+/// compiled with `-Cpanic=unwind` and referenced from another crate compiled
+/// with `-Cpanic=abort` will look like they can't unwind when in fact they
+/// might (from a foreign exception or similar).
+#[inline]
 pub fn fn_can_unwind(
-    panic_strategy: PanicStrategy,
+    tcx: TyCtxt<'tcx>,
     codegen_fn_attr_flags: CodegenFnAttrFlags,
-    call_conv: Conv,
     abi: SpecAbi,
 ) -> bool {
-    if panic_strategy != PanicStrategy::Unwind {
-        // In panic=abort mode we assume nothing can unwind anywhere, so
-        // optimize based on this!
-        false
-    } else if codegen_fn_attr_flags.contains(CodegenFnAttrFlags::UNWIND) {
-        // If a specific #[unwind] attribute is present, use that.
-        true
-    } else if codegen_fn_attr_flags.contains(CodegenFnAttrFlags::RUSTC_ALLOCATOR_NOUNWIND) {
-        // Special attribute for allocator functions, which can't unwind.
-        false
-    } else {
-        if call_conv == Conv::Rust {
-            // Any Rust method (or `extern "Rust" fn` or `extern
-            // "rust-call" fn`) is explicitly allowed to unwind
-            // (unless it has no-unwind attribute, handled above).
-            true
-        } else {
-            // Anything else is either:
-            //
-            //  1. A foreign item using a non-Rust ABI (like `extern "C" { fn foo(); }`), or
-            //
-            //  2. A Rust item using a non-Rust ABI (like `extern "C" fn foo() { ... }`).
-            //
-            // In both of these cases, we should refer to the ABI to determine whether or not we
-            // should unwind. See Rust RFC 2945 for more information on this behavior, here:
-            // https://github.com/rust-lang/rfcs/blob/master/text/2945-c-unwind-abi.md
-            use SpecAbi::*;
-            match abi {
-                C { unwind } | Stdcall { unwind } | System { unwind } | Thiscall { unwind } => {
-                    unwind
-                }
-                Cdecl
-                | Fastcall
-                | Vectorcall
-                | Aapcs
-                | Win64
-                | SysV64
-                | PtxKernel
-                | Msp430Interrupt
-                | X86Interrupt
-                | AmdGpuKernel
-                | EfiApi
-                | AvrInterrupt
-                | AvrNonBlockingInterrupt
-                | CCmseNonSecureCall
-                | Wasm
-                | RustIntrinsic
-                | PlatformIntrinsic
-                | Unadjusted => false,
-                // In the `if` above, we checked for functions with the Rust calling convention.
-                Rust | RustCall => unreachable!(),
-            }
+    // Special attribute for functions which can't unwind.
+    if codegen_fn_attr_flags.contains(CodegenFnAttrFlags::NEVER_UNWIND) {
+        return false;
+    }
+
+    // Otherwise if this isn't special then unwinding is generally determined by
+    // the ABI of the itself. ABIs like `C` have variants which also
+    // specifically allow unwinding (`C-unwind`), but not all platform-specific
+    // ABIs have such an option. Otherwise the only other thing here is Rust
+    // itself, and those ABIs are determined by the panic strategy configured
+    // for this compilation.
+    //
+    // Unfortunately at this time there's also another caveat. Rust [RFC
+    // 2945][rfc] has been accepted and is in the process of being implemented
+    // and stabilized. In this interim state we need to deal with historical
+    // rustc behavior as well as plan for future rustc behavior.
+    //
+    // Historically functions declared with `extern "C"` were marked at the
+    // codegen layer as `nounwind`. This happened regardless of `panic=unwind`
+    // or not. This is UB for functions in `panic=unwind` mode that then
+    // actually panic and unwind. Note that this behavior is true for both
+    // externally declared functions as well as Rust-defined function.
+    //
+    // To fix this UB rustc would like to change in the future to catch unwinds
+    // from function calls that may unwind within a Rust-defined `extern "C"`
+    // function and forcibly abort the process, thereby respecting the
+    // `nounwind` attribut emitted for `extern "C"`. This behavior change isn't
+    // ready to roll out, so determining whether or not the `C` family of ABIs
+    // unwinds is conditional not only on their definition but also whether the
+    // `#![feature(c_unwind)]` feature gate is active.
+    //
+    // Note that this means that unlike historical compilers rustc now, by
+    // default, unconditionally thinks that the `C` ABI may unwind. This will
+    // prevent some optimization opportunities, however, so we try to scope this
+    // change and only assume that `C` unwinds with `panic=unwind` (as opposed
+    // to `panic=abort`).
+    //
+    // Eventually the check against `c_unwind` here will ideally get removed and
+    // this'll be a little cleaner as it'll be a straightforward check of the
+    // ABI.
+    //
+    // [rfc]: https://github.com/rust-lang/rfcs/blob/master/text/2945-c-unwind-abi.md
+    use SpecAbi::*;
+    match abi {
+        C { unwind } | Stdcall { unwind } | System { unwind } | Thiscall { unwind } => {
+            unwind
+                || (!tcx.features().c_unwind && tcx.sess.panic_strategy() == PanicStrategy::Unwind)
         }
+        Cdecl
+        | Fastcall
+        | Vectorcall
+        | Aapcs
+        | Win64
+        | SysV64
+        | PtxKernel
+        | Msp430Interrupt
+        | X86Interrupt
+        | AmdGpuKernel
+        | EfiApi
+        | AvrInterrupt
+        | AvrNonBlockingInterrupt
+        | CCmseNonSecureCall
+        | Wasm
+        | RustIntrinsic
+        | PlatformIntrinsic
+        | Unadjusted => false,
+        Rust | RustCall => tcx.sess.panic_strategy() == PanicStrategy::Unwind,
     }
 }
 
+#[inline]
 pub fn conv_from_spec_abi(tcx: TyCtxt<'_>, abi: SpecAbi) -> Conv {
     use rustc_target::spec::abi::Abi::*;
     match tcx.sess.target.adjust_abi(abi) {
@@ -2689,11 +2723,6 @@ pub fn conv_from_spec_abi(tcx: TyCtxt<'_>, abi: SpecAbi) -> Conv {
     }
 }
 
-pub fn fn_ptr_codegen_fn_attr_flags() -> CodegenFnAttrFlags {
-    // Assume that fn pointers may always unwind
-    CodegenFnAttrFlags::UNWIND
-}
-
 impl<'tcx, C> FnAbiExt<'tcx, C> for call::FnAbi<'tcx, Ty<'tcx>>
 where
     C: LayoutOf<Ty = Ty<'tcx>, TyAndLayout = TyAndLayout<'tcx>>
@@ -2703,7 +2732,7 @@ where
         + HasParamEnv<'tcx>,
 {
     fn of_fn_ptr(cx: &C, sig: ty::PolyFnSig<'tcx>, extra_args: &[Ty<'tcx>]) -> Self {
-        call::FnAbi::new_internal(cx, sig, extra_args, None, fn_ptr_codegen_fn_attr_flags(), false)
+        call::FnAbi::new_internal(cx, sig, extra_args, None, CodegenFnAttrFlags::empty(), false)
     }
 
     fn of_instance(cx: &C, instance: ty::Instance<'tcx>, extra_args: &[Ty<'tcx>]) -> Self {
@@ -2795,10 +2824,8 @@ where
                 return;
             }
 
-            if scalar.valid_range.start() < scalar.valid_range.end() {
-                if *scalar.valid_range.start() > 0 {
-                    attrs.set(ArgAttribute::NonNull);
-                }
+            if !scalar.valid_range.contains_zero() {
+                attrs.set(ArgAttribute::NonNull);
             }
 
             if let Some(pointee) = layout.pointee_info_at(cx, offset) {
@@ -2895,12 +2922,7 @@ where
             c_variadic: sig.c_variadic,
             fixed_count: inputs.len(),
             conv,
-            can_unwind: fn_can_unwind(
-                cx.tcx().sess.panic_strategy(),
-                codegen_fn_attr_flags,
-                conv,
-                sig.abi,
-            ),
+            can_unwind: fn_can_unwind(cx.tcx(), codegen_fn_attr_flags, sig.abi),
         };
         fn_abi.adjust_for_abi(cx, sig.abi);
         debug!("FnAbi::new_internal = {:?}", fn_abi);

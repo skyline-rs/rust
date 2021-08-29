@@ -31,9 +31,8 @@ use rustc_trait_selection::traits;
 use crate::const_eval::ConstEvalErr;
 use crate::interpret::{
     self, compile_time_machine, AllocId, Allocation, ConstValue, CtfeValidationMode, Frame, ImmTy,
-    Immediate, InterpCx, InterpResult, LocalState, LocalValue, MemPlace, Memory, MemoryKind, OpTy,
-    Operand as InterpOperand, PlaceTy, Pointer, Scalar, ScalarMaybeUninit, StackPopCleanup,
-    StackPopUnwind,
+    Immediate, InterpCx, InterpResult, LocalState, LocalValue, MemPlace, MemoryKind, OpTy,
+    Operand as InterpOperand, PlaceTy, Scalar, ScalarMaybeUninit, StackPopCleanup, StackPopUnwind,
 };
 use crate::transform::MirPass;
 
@@ -121,7 +120,7 @@ impl<'tcx> MirPass<'tcx> for ConstProp {
             .predicates_of(def_id.to_def_id())
             .predicates
             .iter()
-            .filter_map(|(p, _)| if p.is_global() { Some(*p) } else { None });
+            .filter_map(|(p, _)| if p.is_global(tcx) { Some(*p) } else { None });
         if traits::impossible_predicates(
             tcx,
             traits::elaborate_predicates(tcx, predicates).map(|o| o.predicate).collect(),
@@ -133,6 +132,7 @@ impl<'tcx> MirPass<'tcx> for ConstProp {
         trace!("ConstProp starting for {:?}", def_id);
 
         let dummy_body = &Body::new(
+            tcx,
             body.source,
             body.basic_blocks().clone(),
             body.source_scopes.clone(),
@@ -146,7 +146,7 @@ impl<'tcx> MirPass<'tcx> for ConstProp {
 
         // FIXME(oli-obk, eddyb) Optimize locals (or even local paths) to hold
         // constants, instead of just checking for const-folding succeeding.
-        // That would require an uniform one-def no-mutation analysis
+        // That would require a uniform one-def no-mutation analysis
         // and RPO (or recursing when needing the value of a local).
         let mut optimization_finder = ConstPropagator::new(body, dummy_body, tcx);
         optimization_finder.visit_body(body);
@@ -157,7 +157,7 @@ impl<'tcx> MirPass<'tcx> for ConstProp {
 
 struct ConstPropMachine<'mir, 'tcx> {
     /// The virtual call stack.
-    stack: Vec<Frame<'mir, 'tcx, (), ()>>,
+    stack: Vec<Frame<'mir, 'tcx>>,
     /// `OnlyInsideOwnBlock` locals that were written in the current block get erased at the end.
     written_only_inside_own_block_locals: FxHashSet<Local>,
     /// Locals that need to be cleared after every block terminates.
@@ -181,6 +181,7 @@ impl<'mir, 'tcx> ConstPropMachine<'mir, 'tcx> {
 
 impl<'mir, 'tcx> interpret::Machine<'mir, 'tcx> for ConstPropMachine<'mir, 'tcx> {
     compile_time_machine!(<'mir, 'tcx>);
+    const PANIC_ON_ALLOC_FAIL: bool = true; // all allocations are small (see `MAX_ALLOC_LIMIT`)
 
     type MemoryKind = !;
 
@@ -220,10 +221,6 @@ impl<'mir, 'tcx> interpret::Machine<'mir, 'tcx> for ConstPropMachine<'mir, 'tcx>
         _unwind: Option<rustc_middle::mir::BasicBlock>,
     ) -> InterpResult<'tcx> {
         bug!("panics terminators are not evaluated in ConstProp")
-    }
-
-    fn ptr_to_int(_mem: &Memory<'mir, 'tcx, Self>, _ptr: Pointer) -> InterpResult<'tcx, u64> {
-        throw_unsup!(ReadPointerAsBytes)
     }
 
     fn binary_ptr_op(
@@ -393,7 +390,11 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
             .filter(|ret_layout| {
                 !ret_layout.is_zst() && ret_layout.size < Size::from_bytes(MAX_ALLOC_LIMIT)
             })
-            .map(|ret_layout| ecx.allocate(ret_layout, MemoryKind::Stack).into());
+            .map(|ret_layout| {
+                ecx.allocate(ret_layout, MemoryKind::Stack)
+                    .expect("couldn't perform small allocation")
+                    .into()
+            });
 
         ecx.push_stack_frame(
             Instance::new(def_id, substs),
@@ -468,7 +469,7 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
     /// Returns the value, if any, of evaluating `c`.
     fn eval_constant(&mut self, c: &Constant<'tcx>, source_info: SourceInfo) -> Option<OpTy<'tcx>> {
         // FIXME we need to revisit this for #67176
-        if c.needs_subst() {
+        if c.definitely_needs_subst(self.tcx) {
             return None;
         }
 
@@ -483,14 +484,14 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
                             // Promoteds must lint and not error as the user didn't ask for them
                             ConstKind::Unevaluated(ty::Unevaluated {
                                 def: _,
-                                substs: _,
+                                substs_: _,
                                 promoted: Some(_),
                             }) => true,
                             // Out of backwards compatibility we cannot report hard errors in unused
                             // generic functions using associated constants of the generic parameters.
-                            _ => c.literal.needs_subst(),
+                            _ => c.literal.definitely_needs_subst(*tcx),
                         },
-                        ConstantKind::Val(_, ty) => ty.needs_subst(),
+                        ConstantKind::Val(_, ty) => ty.definitely_needs_subst(*tcx),
                     };
                     if lint_only {
                         // Out of backwards compatibility we cannot report hard errors in unused
@@ -582,8 +583,7 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
             let left_size = self.ecx.layout_of(left_ty).ok()?.size;
             let right_size = r.layout.size;
             let r_bits = r.to_scalar().ok();
-            // This is basically `force_bits`.
-            let r_bits = r_bits.and_then(|r| r.to_bits_or_ptr(right_size, &self.tcx).ok());
+            let r_bits = r_bits.and_then(|r| r.to_bits(right_size).ok());
             if r_bits.map_or(false, |b| b >= left_size.bits() as u128) {
                 debug!("check_binary_op: reporting assert for {:?}", source_info);
                 self.report_assert_as_lint(
@@ -721,7 +721,7 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
         }
 
         // FIXME we need to revisit this for #67176
-        if rvalue.needs_subst() {
+        if rvalue.definitely_needs_subst(self.tcx) {
             return None;
         }
 
@@ -754,8 +754,7 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
                         }
                     };
 
-                    let arg_value =
-                        this.ecx.force_bits(const_arg.to_scalar()?, const_arg.layout.size)?;
+                    let arg_value = const_arg.to_scalar()?.to_bits(const_arg.layout.size)?;
                     let dest = this.ecx.eval_place(place)?;
 
                     match op {
@@ -871,7 +870,7 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
                                     let alloc = this
                                         .ecx
                                         .intern_with_temp_alloc(value.layout, |ecx, dest| {
-                                            ecx.write_immediate_to_mplace(*imm, dest)
+                                            ecx.write_immediate(*imm, dest)
                                         })
                                         .unwrap();
                                     Ok(Some(alloc))
@@ -923,12 +922,12 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
 
         match **op {
             interpret::Operand::Immediate(Immediate::Scalar(ScalarMaybeUninit::Scalar(s))) => {
-                s.is_bits()
+                s.try_to_int().is_ok()
             }
             interpret::Operand::Immediate(Immediate::ScalarPair(
                 ScalarMaybeUninit::Scalar(l),
                 ScalarMaybeUninit::Scalar(r),
-            )) => l.is_bits() && r.is_bits(),
+            )) => l.try_to_int().is_ok() && r.try_to_int().is_ok(),
             _ => false,
         }
     }

@@ -3,7 +3,9 @@ use crate::convert::TryFrom;
 use crate::mem;
 use crate::ops::{self, Try};
 
-use super::{FusedIterator, TrustedLen, TrustedRandomAccess, TrustedStep};
+use super::{
+    FusedIterator, TrustedLen, TrustedRandomAccess, TrustedRandomAccessNoCoerce, TrustedStep,
+};
 
 // Safety: All invariants are upheld.
 macro_rules! unsafe_impl_trusted_step {
@@ -30,7 +32,7 @@ pub trait Step: Clone + PartialOrd + Sized {
     /// For any `a`, `b`, and `n`:
     ///
     /// * `steps_between(&a, &b) == Some(n)` if and only if `Step::forward_checked(&a, n) == Some(b)`
-    /// * `steps_between(&a, &b) == Some(n)` if and only if `Step::backward_checked(&a, n) == Some(a)`
+    /// * `steps_between(&a, &b) == Some(n)` if and only if `Step::backward_checked(&b, n) == Some(a)`
     /// * `steps_between(&a, &b) == Some(n)` only if `a <= b`
     ///   * Corollary: `steps_between(&a, &b) == Some(0)` if and only if `a == b`
     ///   * Note that `a <= b` does _not_ imply `steps_between(&a, &b) != None`;
@@ -275,7 +277,7 @@ macro_rules! step_integer_impls {
                         //
                         // Casting to isize extends the width but preserves the sign.
                         // Use wrapping_sub in isize space and cast to usize to compute
-                        // the difference that may not fit inside the range of isize.
+                        // the difference that might not fit inside the range of isize.
                         Some((*end as isize).wrapping_sub(*start as isize) as usize)
                     } else {
                         None
@@ -495,7 +497,11 @@ macro_rules! unsafe_range_trusted_random_access_impl {
     ($($t:ty)*) => ($(
         #[doc(hidden)]
         #[unstable(feature = "trusted_random_access", issue = "none")]
-        unsafe impl TrustedRandomAccess for ops::Range<$t> {
+        unsafe impl TrustedRandomAccess for ops::Range<$t> {}
+
+        #[doc(hidden)]
+        #[unstable(feature = "trusted_random_access", issue = "none")]
+        unsafe impl TrustedRandomAccessNoCoerce for ops::Range<$t> {
             const MAY_HAVE_SIDE_EFFECT: bool = false;
         }
     )*)
@@ -670,7 +676,7 @@ impl<A: Step> Iterator for ops::Range<A> {
     #[doc(hidden)]
     unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> Self::Item
     where
-        Self: TrustedRandomAccess,
+        Self: TrustedRandomAccessNoCoerce,
     {
         // SAFETY: The TrustedRandomAccess contract requires that callers only  pass an index
         // that is in bounds.

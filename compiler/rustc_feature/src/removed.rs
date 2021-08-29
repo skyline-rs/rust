@@ -111,7 +111,7 @@ declare_features! (
      Some("subsumed by `.await` syntax")),
     /// Allows defining `existential type`s.
     (removed, existential_type, "1.38.0", Some(63063), None,
-     Some("removed in favor of `#![feature(min_type_alias_impl_trait)]`")),
+     Some("removed in favor of `#![feature(type_alias_impl_trait)]`")),
     /// Allows using the macros:
     /// + `__diagnostic_used`
     /// + `__register_diagnostic`
@@ -123,6 +123,9 @@ declare_features! (
     /// Allows overlapping impls of marker traits.
     (removed, overlapping_marker_traits, "1.42.0", Some(29864), None,
      Some("removed in favor of `#![feature(marker_trait_attr)]`")),
+    /// Allows `T: ?const Trait` syntax in bounds.
+    (removed, const_trait_bound_opt_out, "1.42.0", Some(67794), None,
+     Some("Removed in favor of `~const` bound in #![feature(const_trait_impl)]")),
     /// Allows `#[no_debug]`.
     (removed, no_debug, "1.43.0", Some(29721), None, Some("removed due to lack of demand")),
     /// Allows comparing raw pointers during const eval.
@@ -136,13 +139,33 @@ declare_features! (
     (removed, main, "1.53.0", Some(29634), None, None),
     (removed, pub_macro_rules, "1.53.0", Some(78855), None,
      Some("removed due to being incomplete, in particular it does not work across crates")),
-     /// Allows the definition of `const` functions with some advanced features.
+    /// Allows the definition of `const` functions with some advanced features.
     (removed, const_fn, "1.54.0", Some(57563), None,
      Some("split into finer-grained feature gates")),
+    /// Allows using `#[plugin_registrar]` on functions.
+    (removed, plugin_registrar, "1.54.0", Some(29597), None,
+     Some("a __rustc_plugin_registrar symbol must now be defined instead")),
 
     /// Allows `#[doc(include = "some-file")]`.
     (removed, external_doc, "1.54.0", Some(44732), None,
      Some("use #[doc = include_str!(\"filename\")] instead, which handles macro invocations")),
+
+     /// Allows casting raw pointers to `usize` during const eval.
+    (removed, const_raw_ptr_to_usize_cast, "1.55.0", Some(51910), None,
+     Some("at compile-time, pointers do not have an integer value, so these casts cannot be properly supported")),
+
+    /// Allows `impl Trait` in bindings (`let`, `const`, `static`).
+    (removed, impl_trait_in_bindings, "1.55.0", Some(63065), None,
+     Some("the implementation was not maintainable, the feature may get reintroduced once the current refactorings are done")),
+
+    /// Allows the use of type alias impl trait in function return positions
+    (removed, min_type_alias_impl_trait, "1.56.0", Some(63063), None,
+     Some("removed in favor of full type_alias_impl_trait")),
+
+    /// Allows `#[unwind(..)]`.
+    ///
+    /// Permits specifying whether a function should permit unwinding or abort on unwind.
+    (removed, unwind_attributes, "1.56.0", Some(58760), None, Some("use the C-unwind ABI instead")),
 
     // -------------------------------------------------------------------------
     // feature-group-end: removed features

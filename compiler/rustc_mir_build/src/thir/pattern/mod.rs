@@ -21,7 +21,7 @@ use rustc_middle::mir::UserTypeProjection;
 use rustc_middle::mir::{BorrowKind, Field, Mutability};
 use rustc_middle::thir::{Ascription, BindingMode, FieldPat, Pat, PatKind, PatRange, PatTyProj};
 use rustc_middle::ty::subst::{GenericArg, SubstsRef};
-use rustc_middle::ty::{self, AdtDef, DefIdTree, Region, Ty, TyCtxt, UserType};
+use rustc_middle::ty::{self, AdtDef, ConstKind, DefIdTree, Region, Ty, TyCtxt, UserType};
 use rustc_span::{Span, Symbol};
 
 use std::cmp::Ordering;
@@ -31,7 +31,6 @@ crate enum PatternError {
     AssocConstInPattern(Span),
     ConstParamInPattern(Span),
     StaticInPattern(Span),
-    FloatBug,
     NonConstPath(Span),
 }
 
@@ -325,7 +324,7 @@ impl<'a, 'tcx> PatCtxt<'a, 'tcx> {
 
     fn lower_tuple_subpats(
         &mut self,
-        pats: &'tcx [&'tcx hir::Pat<'tcx>],
+        pats: &'tcx [hir::Pat<'tcx>],
         expected_len: usize,
         gap_pos: Option<usize>,
     ) -> Vec<FieldPat<'tcx>> {
@@ -338,7 +337,7 @@ impl<'a, 'tcx> PatCtxt<'a, 'tcx> {
             .collect()
     }
 
-    fn lower_patterns(&mut self, pats: &'tcx [&'tcx hir::Pat<'tcx>]) -> Vec<Pat<'tcx>> {
+    fn lower_patterns(&mut self, pats: &'tcx [hir::Pat<'tcx>]) -> Vec<Pat<'tcx>> {
         pats.iter().map(|p| self.lower_pattern(p)).collect()
     }
 
@@ -350,9 +349,9 @@ impl<'a, 'tcx> PatCtxt<'a, 'tcx> {
         &mut self,
         span: Span,
         ty: Ty<'tcx>,
-        prefix: &'tcx [&'tcx hir::Pat<'tcx>],
+        prefix: &'tcx [hir::Pat<'tcx>],
         slice: &'tcx Option<&'tcx hir::Pat<'tcx>>,
-        suffix: &'tcx [&'tcx hir::Pat<'tcx>],
+        suffix: &'tcx [hir::Pat<'tcx>],
     ) -> PatKind<'tcx> {
         let prefix = self.lower_patterns(prefix);
         let slice = self.lower_opt_pattern(slice);
@@ -546,6 +545,11 @@ impl<'a, 'tcx> PatCtxt<'a, 'tcx> {
                 hir::ExprKind::ConstBlock(ref anon_const) => {
                     let anon_const_def_id = self.tcx.hir().local_def_id(anon_const.hir_id);
                     let value = ty::Const::from_anon_const(self.tcx, anon_const_def_id);
+                    if matches!(value.val, ConstKind::Param(_)) {
+                        let span = self.tcx.hir().span(anon_const.hir_id);
+                        self.errors.push(PatternError::ConstParamInPattern(span));
+                        return PatKind::Wild;
+                    }
                     return *self.const_to_pat(value, expr.hir_id, expr.span, false).kind;
                 }
                 hir::ExprKind::Lit(ref lit) => (lit, false),
@@ -563,10 +567,6 @@ impl<'a, 'tcx> PatCtxt<'a, 'tcx> {
                 LitToConstInput { lit: &lit.node, ty: self.typeck_results.expr_ty(expr), neg };
             match self.tcx.at(expr.span).lit_to_const(lit_input) {
                 Ok(val) => *self.const_to_pat(val, expr.hir_id, lit.span, false).kind,
-                Err(LitToConstError::UnparseableFloat) => {
-                    self.errors.push(PatternError::FloatBug);
-                    PatKind::Wild
-                }
                 Err(LitToConstError::Reported) => PatKind::Wild,
                 Err(LitToConstError::TypeError) => bug!("lower_lit: had type error"),
             }
@@ -605,7 +605,7 @@ crate trait PatternFolder<'tcx>: Sized {
 impl<'tcx, T: PatternFoldable<'tcx>> PatternFoldable<'tcx> for Box<T> {
     fn super_fold_with<F: PatternFolder<'tcx>>(&self, folder: &mut F) -> Self {
         let content: T = (**self).fold_with(folder);
-        box content
+        Box::new(content)
     }
 }
 

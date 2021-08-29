@@ -22,7 +22,7 @@
 //! are unrelated to the `TyCtxt` global. Without initializing the `Span` session globals, some
 //! basic, coverage-specific features would be impossible to test, but thankfully initializing these
 //! globals is comparatively simpler. The easiest way is to wrap the test in a closure argument
-//! to: `rustc_span::with_default_session_globals(|| { test_here(); })`.
+//! to: `rustc_span::create_default_session_globals_then(|| { test_here(); })`.
 
 use super::counters;
 use super::debug;
@@ -44,11 +44,11 @@ const TEMP_BLOCK: BasicBlock = BasicBlock::MAX;
 
 fn dummy_ty() -> &'static TyS<'static> {
     thread_local! {
-        static DUMMY_TYS: &'static TyS<'static> = Box::leak(box TyS::make_for_test(
+        static DUMMY_TYS: &'static TyS<'static> = Box::leak(Box::new(TyS::make_for_test(
             ty::Bool,
             TypeFlags::empty(),
             DebruijnIndex::from_usize(0),
-        ));
+        )));
     }
 
     &DUMMY_TYS.with(|tys| *tys)
@@ -677,7 +677,7 @@ fn synthesize_body_span_from_terminators(mir_body: &Body<'_>) -> Span {
 
 #[test]
 fn test_make_bcb_counters() {
-    rustc_span::with_default_session_globals(|| {
+    rustc_span::create_default_session_globals_then(|| {
         let mir_body = goto_switchint();
         let body_span = synthesize_body_span_from_terminators(&mir_body);
         let mut basic_coverage_blocks = graph::CoverageGraph::from_mir(&mir_body);

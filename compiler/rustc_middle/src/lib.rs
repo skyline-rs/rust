@@ -23,16 +23,18 @@
 //! This API is completely unstable and subject to change.
 
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
+#![feature(allocator_api)]
 #![feature(array_windows)]
 #![feature(assert_matches)]
 #![feature(backtrace)]
 #![feature(bool_to_option)]
 #![feature(box_patterns)]
-#![feature(box_syntax)]
 #![feature(core_intrinsics)]
 #![feature(discriminant_kind)]
+#![feature(if_let_guard)]
 #![feature(never_type)]
 #![feature(extern_types)]
+#![feature(new_uninit)]
 #![feature(nll)]
 #![feature(once_cell)]
 #![feature(min_specialization)]
@@ -48,6 +50,10 @@
 #![feature(associated_type_defaults)]
 #![feature(iter_zip)]
 #![feature(thread_local_const_init)]
+#![feature(try_reserve)]
+#![feature(try_reserve_kind)]
+#![feature(nonzero_ops)]
+#![cfg_attr(bootstrap, allow(incomplete_features))] // if_let_guard
 #![recursion_limit = "512"]
 
 #[macro_use]

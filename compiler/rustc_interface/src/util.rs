@@ -2,23 +2,22 @@ use rustc_ast::mut_visit::{visit_clobber, MutVisitor, *};
 use rustc_ast::ptr::P;
 use rustc_ast::{self as ast, AttrVec, BlockCheckMode};
 use rustc_codegen_ssa::traits::CodegenBackend;
-use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 #[cfg(parallel_compiler)]
 use rustc_data_structures::jobserver;
-use rustc_data_structures::stable_hasher::StableHasher;
 use rustc_data_structures::sync::Lrc;
 use rustc_errors::registry::Registry;
 use rustc_metadata::dynamic_lib::DynamicLibrary;
 #[cfg(parallel_compiler)]
 use rustc_middle::ty::tls;
+#[cfg(parallel_compiler)]
+use rustc_query_impl::QueryCtxt;
 use rustc_resolve::{self, Resolver};
 use rustc_session as session;
 use rustc_session::config::{self, CrateType};
 use rustc_session::config::{ErrorOutputType, Input, OutputFilenames};
 use rustc_session::lint::{self, BuiltinLintDiagnostics, LintBuffer};
 use rustc_session::parse::CrateConfig;
-use rustc_session::CrateDisambiguator;
 use rustc_session::{early_error, filesearch, output, DiagnosticOutput, Session};
 use rustc_span::edition::Edition;
 use rustc_span::lev_distance::find_best_match_for_name;
@@ -153,7 +152,7 @@ pub fn setup_callbacks_and_run_in_thread_pool_with_globals<F: FnOnce() -> R + Se
     crate::callbacks::setup_callbacks();
 
     let main_handler = move || {
-        rustc_span::with_session_globals(edition, || {
+        rustc_span::create_session_globals_then(edition, || {
             io::set_output_capture(stderr.clone());
             f()
         })
@@ -174,12 +173,13 @@ unsafe fn handle_deadlock() {
     rustc_data_structures::sync::assert_sync::<tls::ImplicitCtxt<'_, '_>>();
     let icx: &tls::ImplicitCtxt<'_, '_> = &*(context as *const tls::ImplicitCtxt<'_, '_>);
 
-    let session_globals = rustc_span::SESSION_GLOBALS.with(|sg| sg as *const _);
+    let session_globals = rustc_span::with_session_globals(|sg| sg as *const _);
     let session_globals = &*session_globals;
     thread::spawn(move || {
         tls::enter_context(icx, |_| {
-            rustc_span::SESSION_GLOBALS
-                .set(session_globals, || tls::with(|tcx| tcx.queries.deadlock(tcx, &registry)))
+            rustc_span::set_session_globals_then(session_globals, || {
+                tls::with(|tcx| QueryCtxt::from_tcx(tcx).deadlock(&registry))
+            })
         });
     });
 }
@@ -206,13 +206,13 @@ pub fn setup_callbacks_and_run_in_thread_pool_with_globals<F: FnOnce() -> R + Se
 
     let with_pool = move |pool: &rayon::ThreadPool| pool.install(f);
 
-    rustc_span::with_session_globals(edition, || {
-        rustc_span::SESSION_GLOBALS.with(|session_globals| {
+    rustc_span::create_session_globals_then(edition, || {
+        rustc_span::with_session_globals(|session_globals| {
             // The main handler runs for each Rayon worker thread and sets up
             // the thread local rustc uses. `session_globals` is captured and set
             // on the new threads.
             let main_handler = move |thread: rayon::ThreadBuilder| {
-                rustc_span::SESSION_GLOBALS.set(session_globals, || {
+                rustc_span::set_session_globals_then(session_globals, || {
                     io::set_output_capture(stderr.clone());
                     thread.run()
                 })
@@ -487,47 +487,14 @@ pub fn get_codegen_sysroot(
     }
 }
 
-pub(crate) fn compute_crate_disambiguator(session: &Session) -> CrateDisambiguator {
-    use std::hash::Hasher;
-
-    // The crate_disambiguator is a 128 bit hash. The disambiguator is fed
-    // into various other hashes quite a bit (symbol hashes, incr. comp. hashes,
-    // debuginfo type IDs, etc), so we don't want it to be too wide. 128 bits
-    // should still be safe enough to avoid collisions in practice.
-    let mut hasher = StableHasher::new();
-
-    let mut metadata = session.opts.cg.metadata.clone();
-    // We don't want the crate_disambiguator to dependent on the order
-    // -C metadata arguments, so sort them:
-    metadata.sort();
-    // Every distinct -C metadata value is only incorporated once:
-    metadata.dedup();
-
-    hasher.write(b"metadata");
-    for s in &metadata {
-        // Also incorporate the length of a metadata string, so that we generate
-        // different values for `-Cmetadata=ab -Cmetadata=c` and
-        // `-Cmetadata=a -Cmetadata=bc`
-        hasher.write_usize(s.len());
-        hasher.write(s.as_bytes());
-    }
-
-    // Also incorporate crate type, so that we don't get symbol conflicts when
-    // linking against a library of the same name, if this is an executable.
-    let is_exe = session.crate_types().contains(&CrateType::Executable);
-    hasher.write(if is_exe { b"exe" } else { b"lib" });
-
-    CrateDisambiguator::from(hasher.finish::<Fingerprint>())
-}
-
 pub(crate) fn check_attr_crate_type(
-    sess: &Session,
+    _sess: &Session,
     attrs: &[ast::Attribute],
     lint_buffer: &mut LintBuffer,
 ) {
     // Unconditionally collect crate types from attributes to make them used
     for a in attrs.iter() {
-        if sess.check_name(a, sym::crate_type) {
+        if a.has_name(sym::crate_type) {
             if let Some(n) = a.value_str() {
                 if categorize_crate_type(n).is_some() {
                     return;
@@ -585,7 +552,7 @@ pub fn collect_crate_types(session: &Session, attrs: &[ast::Attribute]) -> Vec<C
     let attr_types: Vec<CrateType> = attrs
         .iter()
         .filter_map(|a| {
-            if session.check_name(a, sym::crate_type) {
+            if a.has_name(sym::crate_type) {
                 match a.value_str() {
                     Some(s) => categorize_crate_type(s),
                     _ => None,

@@ -491,15 +491,19 @@ fn bcb_filtered_successors<'a, 'tcx>(
     term_kind: &'tcx TerminatorKind<'tcx>,
 ) -> Box<dyn Iterator<Item = &'a BasicBlock> + 'a> {
     let mut successors = term_kind.successors();
-    box match &term_kind {
-        // SwitchInt successors are never unwind, and all of them should be traversed.
-        TerminatorKind::SwitchInt { .. } => successors,
-        // For all other kinds, return only the first successor, if any, and ignore unwinds.
-        // NOTE: `chain(&[])` is required to coerce the `option::iter` (from
-        // `next().into_iter()`) into the `mir::Successors` aliased type.
-        _ => successors.next().into_iter().chain(&[]),
-    }
-    .filter(move |&&successor| body[successor].terminator().kind != TerminatorKind::Unreachable)
+    Box::new(
+        match &term_kind {
+            // SwitchInt successors are never unwind, and all of them should be traversed.
+            TerminatorKind::SwitchInt { .. } => successors,
+            // For all other kinds, return only the first successor, if any, and ignore unwinds.
+            // NOTE: `chain(&[])` is required to coerce the `option::iter` (from
+            // `next().into_iter()`) into the `mir::Successors` aliased type.
+            _ => successors.next().into_iter().chain(&[]),
+        }
+        .filter(move |&&successor| {
+            body[successor].terminator().kind != TerminatorKind::Unreachable
+        }),
+    )
 }
 
 /// Maintains separate worklists for each loop in the BasicCoverageBlock CFG, plus one for the
@@ -526,8 +530,8 @@ impl TraverseCoverageGraphWithLoops {
     pub fn new(basic_coverage_blocks: &CoverageGraph) -> Self {
         let start_bcb = basic_coverage_blocks.start_node();
         let backedges = find_loop_backedges(basic_coverage_blocks);
-        let mut context_stack = Vec::new();
-        context_stack.push(TraversalContext { loop_backedges: None, worklist: vec![start_bcb] });
+        let context_stack =
+            vec![TraversalContext { loop_backedges: None, worklist: vec![start_bcb] }];
         // `context_stack` starts with a `TraversalContext` for the main function context (beginning
         // with the `start` BasicCoverageBlock of the function). New worklists are pushed to the top
         // of the stack as loops are entered, and popped off of the stack when a loop's worklist is

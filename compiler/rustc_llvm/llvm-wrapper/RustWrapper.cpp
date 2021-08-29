@@ -270,34 +270,30 @@ extern "C" void LLVMRustAddFunctionAttribute(LLVMValueRef Fn, unsigned Index,
                                              LLVMRustAttribute RustAttr) {
   Function *A = unwrap<Function>(Fn);
   Attribute Attr = Attribute::get(A->getContext(), fromRust(RustAttr));
-  AttrBuilder B(Attr);
-  A->addAttributes(Index, B);
+  A->addAttribute(Index, Attr);
 }
 
 extern "C" void LLVMRustAddAlignmentAttr(LLVMValueRef Fn,
                                          unsigned Index,
                                          uint32_t Bytes) {
   Function *A = unwrap<Function>(Fn);
-  AttrBuilder B;
-  B.addAlignmentAttr(Bytes);
-  A->addAttributes(Index, B);
+  A->addAttribute(Index, Attribute::getWithAlignment(
+      A->getContext(), llvm::Align(Bytes)));
 }
 
 extern "C" void LLVMRustAddDereferenceableAttr(LLVMValueRef Fn, unsigned Index,
                                                uint64_t Bytes) {
   Function *A = unwrap<Function>(Fn);
-  AttrBuilder B;
-  B.addDereferenceableAttr(Bytes);
-  A->addAttributes(Index, B);
+  A->addAttribute(Index, Attribute::getWithDereferenceableBytes(A->getContext(),
+                                                                Bytes));
 }
 
 extern "C" void LLVMRustAddDereferenceableOrNullAttr(LLVMValueRef Fn,
                                                      unsigned Index,
                                                      uint64_t Bytes) {
   Function *A = unwrap<Function>(Fn);
-  AttrBuilder B;
-  B.addDereferenceableOrNullAttr(Bytes);
-  A->addAttributes(Index, B);
+  A->addAttribute(Index, Attribute::getWithDereferenceableOrNullBytes(
+      A->getContext(), Bytes));
 }
 
 extern "C" void LLVMRustAddByValAttr(LLVMValueRef Fn, unsigned Index,
@@ -323,9 +319,8 @@ extern "C" void LLVMRustAddFunctionAttrStringValue(LLVMValueRef Fn,
                                                    const char *Name,
                                                    const char *Value) {
   Function *F = unwrap<Function>(Fn);
-  AttrBuilder B;
-  B.addAttribute(Name, Value);
-  F->addAttributes(Index, B);
+  F->addAttribute(Index, Attribute::get(
+      F->getContext(), StringRef(Name), StringRef(Value)));
 }
 
 extern "C" void LLVMRustRemoveFunctionAttributes(LLVMValueRef Fn,
@@ -349,11 +344,10 @@ extern "C" void LLVMRustSetFastMath(LLVMValueRef V) {
 }
 
 extern "C" LLVMValueRef
-LLVMRustBuildAtomicLoad(LLVMBuilderRef B, LLVMValueRef Source, const char *Name,
-                        LLVMAtomicOrdering Order) {
+LLVMRustBuildAtomicLoad(LLVMBuilderRef B, LLVMTypeRef Ty, LLVMValueRef Source,
+                        const char *Name, LLVMAtomicOrdering Order) {
   Value *Ptr = unwrap(Source);
-  Type *Ty = Ptr->getType()->getPointerElementType();
-  LoadInst *LI = unwrap(B)->CreateLoad(Ty, Ptr, Name);
+  LoadInst *LI = unwrap(B)->CreateLoad(unwrap(Ty), Ptr, Name);
   LI->setAtomic(fromRust(Order));
   return wrap(LI);
 }
@@ -1115,15 +1109,13 @@ extern "C" void
 LLVMRustUnpackInlineAsmDiagnostic(LLVMDiagnosticInfoRef DI,
                                   LLVMRustDiagnosticLevel *LevelOut,
                                   unsigned *CookieOut,
-                                  LLVMTwineRef *MessageOut,
-                                  LLVMValueRef *InstructionOut) {
+                                  LLVMTwineRef *MessageOut) {
   // Undefined to call this not on an inline assembly diagnostic!
   llvm::DiagnosticInfoInlineAsm *IA =
       static_cast<llvm::DiagnosticInfoInlineAsm *>(unwrap(DI));
 
   *CookieOut = IA->getLocCookie();
   *MessageOut = wrap(&IA->getMsgStr());
-  *InstructionOut = wrap(IA->getInstruction());
 
   switch (IA->getSeverity()) {
     case DS_Error:
@@ -1166,6 +1158,7 @@ enum class LLVMRustDiagnosticKind {
   PGOProfile,
   Linker,
   Unsupported,
+  SrcMgr,
 };
 
 static LLVMRustDiagnosticKind toRust(DiagnosticKind Kind) {
@@ -1194,6 +1187,10 @@ static LLVMRustDiagnosticKind toRust(DiagnosticKind Kind) {
     return LLVMRustDiagnosticKind::Linker;
   case DK_Unsupported:
     return LLVMRustDiagnosticKind::Unsupported;
+#if LLVM_VERSION_GE(13, 0)
+  case DK_SrcMgr:
+    return LLVMRustDiagnosticKind::SrcMgr;
+#endif
   default:
     return (Kind >= DK_FirstRemark && Kind <= DK_LastRemark)
                ? LLVMRustDiagnosticKind::OptimizationRemarkOther
@@ -1278,6 +1275,17 @@ extern "C" void LLVMRustSetInlineAsmDiagnosticHandler(
   // with LLVM 13 this function is gone.
 #if LLVM_VERSION_LT(13, 0)
   unwrap(C)->setInlineAsmDiagnosticHandler(H, CX);
+#endif
+}
+
+extern "C" LLVMSMDiagnosticRef LLVMRustGetSMDiagnostic(
+    LLVMDiagnosticInfoRef DI, unsigned *Cookie) {
+#if LLVM_VERSION_GE(13, 0)
+  llvm::DiagnosticInfoSrcMgr *SM = static_cast<llvm::DiagnosticInfoSrcMgr *>(unwrap(DI));
+  *Cookie = SM->getLocCookie();
+  return wrap(&SM->getSMDiag());
+#else
+  report_fatal_error("Shouldn't get called on older versions");
 #endif
 }
 
@@ -1393,11 +1401,11 @@ extern "C" void LLVMRustFreeOperandBundleDef(OperandBundleDef *Bundle) {
   delete Bundle;
 }
 
-extern "C" LLVMValueRef LLVMRustBuildCall(LLVMBuilderRef B, LLVMValueRef Fn,
+extern "C" LLVMValueRef LLVMRustBuildCall(LLVMBuilderRef B, LLVMTypeRef Ty, LLVMValueRef Fn,
                                           LLVMValueRef *Args, unsigned NumArgs,
                                           OperandBundleDef *Bundle) {
   Value *Callee = unwrap(Fn);
-  FunctionType *FTy = cast<FunctionType>(Callee->getType()->getPointerElementType());
+  FunctionType *FTy = unwrap<FunctionType>(Ty);
   unsigned Len = Bundle ? 1 : 0;
   ArrayRef<OperandBundleDef> Bundles = makeArrayRef(Bundle, Len);
   return wrap(unwrap(B)->CreateCall(
@@ -1438,12 +1446,12 @@ extern "C" LLVMValueRef LLVMRustBuildMemSet(LLVMBuilderRef B,
 }
 
 extern "C" LLVMValueRef
-LLVMRustBuildInvoke(LLVMBuilderRef B, LLVMValueRef Fn, LLVMValueRef *Args,
-                    unsigned NumArgs, LLVMBasicBlockRef Then,
-                    LLVMBasicBlockRef Catch, OperandBundleDef *Bundle,
-                    const char *Name) {
+LLVMRustBuildInvoke(LLVMBuilderRef B, LLVMTypeRef Ty, LLVMValueRef Fn,
+                    LLVMValueRef *Args, unsigned NumArgs,
+                    LLVMBasicBlockRef Then, LLVMBasicBlockRef Catch,
+                    OperandBundleDef *Bundle, const char *Name) {
   Value *Callee = unwrap(Fn);
-  FunctionType *FTy = cast<FunctionType>(Callee->getType()->getPointerElementType());
+  FunctionType *FTy = unwrap<FunctionType>(Ty);
   unsigned Len = Bundle ? 1 : 0;
   ArrayRef<OperandBundleDef> Bundles = makeArrayRef(Bundle, Len);
   return wrap(unwrap(B)->CreateInvoke(FTy, Callee, unwrap(Then), unwrap(Catch),
@@ -1550,6 +1558,16 @@ extern "C" LLVMRustLinkage LLVMRustGetLinkage(LLVMValueRef V) {
 extern "C" void LLVMRustSetLinkage(LLVMValueRef V,
                                    LLVMRustLinkage RustLinkage) {
   LLVMSetLinkage(V, fromRust(RustLinkage));
+}
+
+extern "C" LLVMValueRef LLVMRustConstInBoundsGEP2(LLVMTypeRef Ty,
+                                                  LLVMValueRef ConstantVal,
+                                                  LLVMValueRef *ConstantIndices,
+                                                  unsigned NumIndices) {
+  ArrayRef<Constant *> IdxList(unwrap<Constant>(ConstantIndices, NumIndices),
+                               NumIndices);
+  Constant *Val = unwrap<Constant>(ConstantVal);
+  return wrap(ConstantExpr::getInBoundsGetElementPtr(unwrap(Ty), Val, IdxList));
 }
 
 // Returns true if both high and low were successfully set. Fails in case constant wasn’t any of

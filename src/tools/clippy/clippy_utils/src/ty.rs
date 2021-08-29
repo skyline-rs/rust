@@ -10,10 +10,11 @@ use rustc_hir::{TyKind, Unsafety};
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_lint::LateContext;
 use rustc_middle::ty::subst::{GenericArg, GenericArgKind};
-use rustc_middle::ty::{self, AdtDef, IntTy, Ty, TypeFoldable, UintTy};
+use rustc_middle::ty::{self, TyCtxt, AdtDef, IntTy, Ty, TypeFoldable, UintTy};
 use rustc_span::sym;
 use rustc_span::symbol::{Ident, Symbol};
 use rustc_span::DUMMY_SP;
+use rustc_trait_selection::infer::InferCtxtExt;
 use rustc_trait_selection::traits::query::normalize::AtExt;
 
 use crate::{match_def_path, must_use_attr};
@@ -35,8 +36,8 @@ pub fn can_partially_move_ty(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
 }
 
 /// Walks into `ty` and returns `true` if any inner type is the same as `other_ty`
-pub fn contains_ty(ty: Ty<'_>, other_ty: Ty<'_>) -> bool {
-    ty.walk().any(|inner| match inner.unpack() {
+pub fn contains_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, other_ty: Ty<'tcx>) -> bool {
+    ty.walk(tcx).any(|inner| match inner.unpack() {
         GenericArgKind::Type(inner_ty) => ty::TyS::same_type(other_ty, inner_ty),
         GenericArgKind::Lifetime(_) | GenericArgKind::Const(_) => false,
     })
@@ -44,8 +45,8 @@ pub fn contains_ty(ty: Ty<'_>, other_ty: Ty<'_>) -> bool {
 
 /// Walks into `ty` and returns `true` if any inner type is an instance of the given adt
 /// constructor.
-pub fn contains_adt_constructor(ty: Ty<'_>, adt: &AdtDef) -> bool {
-    ty.walk().any(|inner| match inner.unpack() {
+pub fn contains_adt_constructor<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, adt: &'tcx AdtDef) -> bool {
+    ty.walk(tcx).any(|inner| match inner.unpack() {
         GenericArgKind::Type(inner_ty) => inner_ty.ty_adt_def() == Some(adt),
         GenericArgKind::Lifetime(_) | GenericArgKind::Const(_) => false,
     })
@@ -112,23 +113,27 @@ pub fn has_iter_method(cx: &LateContext<'_>, probably_ref_ty: Ty<'_>) -> Option<
 }
 
 /// Checks whether a type implements a trait.
-/// See also `get_trait_def_id`.
+/// The function returns false in case the type contains an inference variable.
+/// See also [`get_trait_def_id`](super::get_trait_def_id).
 pub fn implements_trait<'tcx>(
     cx: &LateContext<'tcx>,
     ty: Ty<'tcx>,
     trait_id: DefId,
     ty_params: &[GenericArg<'tcx>],
 ) -> bool {
-    // Do not check on infer_types to avoid panic in evaluate_obligation.
-    if ty.has_infer_types() {
-        return false;
-    }
+    // Clippy shouldn't have infer types
+    assert!(!ty.needs_infer());
+
     let ty = cx.tcx.erase_regions(ty);
     if ty.has_escaping_bound_vars() {
         return false;
     }
     let ty_params = cx.tcx.mk_substs(ty_params.iter());
-    cx.tcx.type_implements_trait((trait_id, ty, ty_params, cx.param_env))
+    cx.tcx.infer_ctxt().enter(|infcx| {
+        infcx
+            .type_implements_trait(trait_id, ty, ty_params, cx.param_env)
+            .must_apply_modulo_regions()
+    })
 }
 
 /// Checks whether this type implements `Drop`.
@@ -152,7 +157,7 @@ pub fn is_must_use_ty<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
         ty::Tuple(substs) => substs.types().any(|ty| is_must_use_ty(cx, ty)),
         ty::Opaque(ref def_id, _) => {
             for (predicate, _) in cx.tcx.explicit_item_bounds(*def_id) {
-                if let ty::PredicateKind::Trait(trait_predicate, _) = predicate.kind().skip_binder() {
+                if let ty::PredicateKind::Trait(trait_predicate) = predicate.kind().skip_binder() {
                     if must_use_attr(cx.tcx.get_attrs(trait_predicate.trait_ref.def_id)).is_some() {
                         return true;
                     }
@@ -175,7 +180,7 @@ pub fn is_must_use_ty<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
 }
 
 // FIXME: Per https://doc.rust-lang.org/nightly/nightly-rustc/rustc_trait_selection/infer/at/struct.At.html#method.normalize
-// this function can be removed once the `normalizie` method does not panic when normalization does
+// this function can be removed once the `normalize` method does not panic when normalization does
 // not succeed
 /// Checks if `Ty` is normalizable. This function is useful
 /// to avoid crashes on `layout_of`.
@@ -204,7 +209,7 @@ fn is_normalizable_helper<'tcx>(
                         .iter()
                         .all(|field| is_normalizable_helper(cx, param_env, field.ty(cx.tcx, substs), cache))
                 }),
-                _ => ty.walk().all(|generic_arg| match generic_arg.unpack() {
+                _ => ty.walk(cx.tcx).all(|generic_arg| match generic_arg.unpack() {
                     GenericArgKind::Type(inner_ty) if inner_ty != ty => {
                         is_normalizable_helper(cx, param_env, inner_ty, cache)
                     },
@@ -231,6 +236,17 @@ pub fn is_recursively_primitive_type(ty: Ty<'_>) -> bool {
     }
 }
 
+/// Checks if the type is a reference equals to a diagnostic item
+pub fn is_type_ref_to_diagnostic_item(cx: &LateContext<'_>, ty: Ty<'_>, diag_item: Symbol) -> bool {
+    match ty.kind() {
+        ty::Ref(_, ref_ty, _) => match ref_ty.kind() {
+            ty::Adt(adt, _) => cx.tcx.is_diagnostic_item(diag_item, adt.did),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// Checks if the type is equal to a diagnostic item
 ///
 /// If you change the signature, remember to update the internal lint `MatchTypeOnDiagItem`
@@ -241,10 +257,12 @@ pub fn is_type_diagnostic_item(cx: &LateContext<'_>, ty: Ty<'_>, diag_item: Symb
     }
 }
 
-/// Checks if the type is equal to a lang item
+/// Checks if the type is equal to a lang item.
+///
+/// Returns `false` if the `LangItem` is not defined.
 pub fn is_type_lang_item(cx: &LateContext<'_>, ty: Ty<'_>, lang_item: hir::LangItem) -> bool {
     match ty.kind() {
-        ty::Adt(adt, _) => cx.tcx.lang_items().require(lang_item).unwrap() == adt.did,
+        ty::Adt(adt, _) => cx.tcx.lang_items().require(lang_item).map_or(false, |li| li == adt.did),
         _ => false,
     }
 }

@@ -133,6 +133,8 @@ pub struct ParseSess {
     pub reached_eof: Lock<bool>,
     /// Environment variables accessed during the build and their values when they exist.
     pub env_depinfo: Lock<FxHashSet<(Symbol, Option<Symbol>)>>,
+    /// File paths accessed during the build.
+    pub file_depinfo: Lock<FxHashSet<Symbol>>,
     /// All the type ascriptions expressions that have had a suggestion for likely path typo.
     pub type_ascription_path_suggestions: Lock<FxHashSet<Span>>,
     /// Whether cfg(version) should treat the current release as incomplete
@@ -165,6 +167,7 @@ impl ParseSess {
             symbol_gallery: SymbolGallery::default(),
             reached_eof: Lock::new(false),
             env_depinfo: Default::default(),
+            file_depinfo: Default::default(),
             type_ascription_path_suggestions: Default::default(),
             assume_incomplete_release: false,
             proc_macro_quoted_spans: Default::default(),
@@ -225,20 +228,12 @@ impl ParseSess {
 
     /// Extend an error with a suggestion to wrap an expression with parentheses to allow the
     /// parser to continue parsing the following operation as part of the same expression.
-    pub fn expr_parentheses_needed(
-        &self,
-        err: &mut DiagnosticBuilder<'_>,
-        span: Span,
-        alt_snippet: Option<String>,
-    ) {
-        if let Some(snippet) = self.source_map().span_to_snippet(span).ok().or(alt_snippet) {
-            err.span_suggestion(
-                span,
-                "parentheses are required to parse this as an expression",
-                format!("({})", snippet),
-                Applicability::MachineApplicable,
-            );
-        }
+    pub fn expr_parentheses_needed(&self, err: &mut DiagnosticBuilder<'_>, span: Span) {
+        err.multipart_suggestion(
+            "parentheses are required to parse this as an expression",
+            vec![(span.shrink_to_lo(), "(".to_string()), (span.shrink_to_hi(), ")".to_string())],
+            Applicability::MachineApplicable,
+        );
     }
 
     pub fn save_proc_macro_span(&self, span: Span) -> usize {

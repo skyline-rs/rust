@@ -619,7 +619,7 @@ impl<'test> TestCx<'test> {
             return;
         }
 
-        // additionally, run `--pretty expanded` and try to build it.
+        // additionally, run `-Zunpretty=expanded` and try to build it.
         let proc_res = self.print_source(ReadFrom::Path, "expanded");
         if !proc_res.status.success() {
             self.fatal_proc_rec("pretty-printing (expanded) failed", &proc_res);
@@ -777,6 +777,14 @@ impl<'test> TestCx<'test> {
         let mut script_str = String::with_capacity(2048);
         script_str.push_str("version\n"); // List CDB (and more) version info in test output
         script_str.push_str(".nvlist\n"); // List loaded `*.natvis` files, bulk of custom MSVC debug
+
+        // If a .js file exists next to the source file being tested, then this is a JavaScript
+        // debugging extension that needs to be loaded.
+        let mut js_extension = self.testpaths.file.clone();
+        js_extension.set_extension("cdb.js");
+        if js_extension.exists() {
+            script_str.push_str(&format!(".scriptload \"{}\"\n", js_extension.to_string_lossy()));
+        }
 
         // Set breakpoints on every line that contains the string "#break"
         let source_file_name = self.testpaths.file.file_name().unwrap().to_string_lossy();
@@ -1125,8 +1133,8 @@ impl<'test> TestCx<'test> {
 
         let rust_type_regexes = vec![
             "^(alloc::([a-z_]+::)+)String$",
-            "^&str$",
-            "^&\\[.+\\]$",
+            "^&(mut )?str$",
+            "^&(mut )?\\[.+\\]$",
             "^(std::ffi::([a-z_]+::)+)OsString$",
             "^(alloc::([a-z_]+::)+)Vec<.+>$",
             "^(alloc::([a-z_]+::)+)VecDeque<.+>$",
@@ -1725,7 +1733,7 @@ impl<'test> TestCx<'test> {
     }
 
     /// For each `aux-build: foo/bar` annotation, we check to find the
-    /// file in a `auxiliary` directory relative to the test itself.
+    /// file in an `auxiliary` directory relative to the test itself.
     fn compute_aux_test_paths(&self, rel_ab: &str) -> TestPaths {
         let test_ab = self
             .testpaths
@@ -2329,13 +2337,17 @@ impl<'test> TestCx<'test> {
         // useful flag.
         //
         // For now, though…
-        if let Some(rev) = self.revision {
-            let prefixes = format!("CHECK,{}", rev);
-            if self.config.llvm_version.unwrap_or(0) >= 130000 {
-                filecheck.args(&["--allow-unused-prefixes", "--check-prefixes", &prefixes]);
-            } else {
-                filecheck.args(&["--check-prefixes", &prefixes]);
-            }
+        let prefix_for_target =
+            if self.config.target.contains("msvc") { "MSVC" } else { "NONMSVC" };
+        let prefixes = if let Some(rev) = self.revision {
+            format!("CHECK,{},{}", prefix_for_target, rev)
+        } else {
+            format!("CHECK,{}", prefix_for_target)
+        };
+        if self.config.llvm_version.unwrap_or(0) >= 130000 {
+            filecheck.args(&["--allow-unused-prefixes", "--check-prefixes", &prefixes]);
+        } else {
+            filecheck.args(&["--check-prefixes", &prefixes]);
         }
         self.compose_and_run(filecheck, "", None, None)
     }
@@ -3215,7 +3227,7 @@ impl<'test> TestCx<'test> {
                 // so it needs to be removed when comparing the run-pass test execution output
                 lazy_static! {
                     static ref REMOTE_TEST_RE: Regex = Regex::new(
-                        "^uploaded \"\\$TEST_BUILD_DIR(/[[:alnum:]_\\-]+)+\", waiting for result\n"
+                        "^uploaded \"\\$TEST_BUILD_DIR(/[[:alnum:]_\\-.]+)+\", waiting for result\n"
                     )
                     .unwrap();
                 }

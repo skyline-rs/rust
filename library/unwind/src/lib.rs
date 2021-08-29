@@ -1,10 +1,12 @@
 #![no_std]
 #![unstable(feature = "panic_unwind", issue = "32837")]
 #![feature(link_cfg)]
+#![feature(native_link_modifiers)]
+#![feature(native_link_modifiers_bundle)]
 #![feature(nll)]
 #![feature(staged_api)]
-#![feature(unwind_attributes)]
 #![feature(static_nobundle)]
+#![feature(c_unwind)]
 #![cfg_attr(not(target_env = "msvc"), feature(libc))]
 
 cfg_if::cfg_if! {
@@ -13,6 +15,7 @@ cfg_if::cfg_if! {
     } else if #[cfg(any(
         target_os = "l4re",
         target_os = "none",
+        target_os = "espidf",
     ))] {
         // These "unix" family members do not have unwinder.
         // Note this also matches x86_64-unknown-none-linuxkernel.
@@ -41,14 +44,14 @@ cfg_if::cfg_if! {
     if #[cfg(all(feature = "llvm-libunwind", feature = "system-llvm-libunwind"))] {
         compile_error!("`llvm-libunwind` and `system-llvm-libunwind` cannot be enabled at the same time");
     } else if #[cfg(feature = "llvm-libunwind")] {
-        #[link(name = "unwind", kind = "static")]
+        #[link(name = "unwind", kind = "static", modifiers = "-bundle")]
         extern "C" {}
     } else if #[cfg(feature = "system-llvm-libunwind")] {
-        #[link(name = "unwind", kind = "static-nobundle", cfg(target_feature = "crt-static"))]
+        #[link(name = "unwind", kind = "static", modifiers = "-bundle", cfg(target_feature = "crt-static"))]
         #[link(name = "unwind", cfg(not(target_feature = "crt-static")))]
         extern "C" {}
     } else {
-        #[link(name = "unwind", kind = "static", cfg(target_feature = "crt-static"))]
+        #[link(name = "unwind", kind = "static", modifiers = "-bundle", cfg(target_feature = "crt-static"))]
         #[link(name = "gcc_s", cfg(not(target_feature = "crt-static")))]
         extern "C" {}
     }
@@ -76,10 +79,10 @@ extern "C" {}
 extern "C" {}
 
 #[cfg(target_os = "redox")]
-#[link(name = "gcc_eh", kind = "static-nobundle", cfg(target_feature = "crt-static"))]
+#[link(name = "gcc_eh", kind = "static", modifiers = "-bundle", cfg(target_feature = "crt-static"))]
 #[link(name = "gcc_s", cfg(not(target_feature = "crt-static")))]
 extern "C" {}
 
 #[cfg(all(target_vendor = "fortanix", target_env = "sgx"))]
-#[link(name = "unwind", kind = "static")]
+#[link(name = "unwind", kind = "static", modifiers = "-bundle")]
 extern "C" {}

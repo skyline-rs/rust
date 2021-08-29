@@ -56,11 +56,11 @@ This API is completely unstable and subject to change.
 */
 
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
-#![feature(bindings_after_at)]
+#![cfg_attr(bootstrap, feature(bindings_after_at))]
 #![feature(bool_to_option)]
-#![feature(box_syntax)]
 #![feature(crate_visibility_modifier)]
 #![feature(format_args_capture)]
+#![feature(if_let_guard)]
 #![feature(in_band_lifetimes)]
 #![feature(is_sorted)]
 #![feature(iter_zip)]
@@ -69,6 +69,7 @@ This API is completely unstable and subject to change.
 #![feature(never_type)]
 #![feature(slice_partition_dedup)]
 #![feature(control_flow_enum)]
+#![cfg_attr(bootstrap, allow(incomplete_features))] // if_let_guard
 #![recursion_limit = "256"]
 
 #[macro_use]
@@ -88,6 +89,7 @@ mod coherence;
 mod collect;
 mod constrained_generic_params;
 mod errors;
+pub mod hir_wf_check;
 mod impl_wf_check;
 mod mem_categorization;
 mod outlives;
@@ -291,7 +293,7 @@ fn check_main_fn_ty(tcx: TyCtxt<'_>, main_def_id: DefId) {
     }
 
     for attr in tcx.get_attrs(main_def_id) {
-        if tcx.sess.check_name(attr, sym::track_caller) {
+        if attr.has_name(sym::track_caller) {
             tcx.sess
                 .struct_span_err(
                     attr.span,
@@ -405,7 +407,7 @@ fn check_start_fn_ty(tcx: TyCtxt<'_>, start_def_id: DefId) {
 
                     let attrs = tcx.hir().attrs(start_id);
                     for attr in attrs {
-                        if tcx.sess.check_name(attr, sym::track_caller) {
+                        if attr.has_name(sym::track_caller) {
                             tcx.sess
                                 .struct_span_err(
                                     attr.span,
@@ -462,6 +464,7 @@ pub fn provide(providers: &mut Providers) {
     variance::provide(providers);
     outlives::provide(providers);
     impl_wf_check::provide(providers);
+    hir_wf_check::provide(providers);
 }
 
 pub fn check_crate(tcx: TyCtxt<'_>) -> Result<(), ErrorReported> {
@@ -545,7 +548,7 @@ pub fn hir_trait_to_predicates<'tcx>(
         &item_cx,
         hir_trait,
         DUMMY_SP,
-        hir::Constness::NotConst,
+        ty::BoundConstness::NotConst,
         self_ty,
         &mut bounds,
         true,

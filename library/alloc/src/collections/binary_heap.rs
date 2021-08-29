@@ -46,7 +46,7 @@
 //!     }
 //! }
 //!
-//! // Each node is represented as an `usize`, for a shorter implementation.
+//! // Each node is represented as a `usize`, for a shorter implementation.
 //! struct Edge {
 //!     node: usize,
 //!     cost: usize,
@@ -207,6 +207,14 @@ use super::SpecExtend;
 ///
 /// // The heap should now be empty.
 /// assert!(heap.is_empty())
+/// ```
+///
+/// A `BinaryHeap` with a known list of items can be initialized from an array:
+///
+/// ```
+/// use std::collections::BinaryHeap;
+///
+/// let heap = BinaryHeap::from([1, 5, 2]);
 /// ```
 ///
 /// ## Min-heap
@@ -965,7 +973,6 @@ impl<T> BinaryHeap<T> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(shrink_to)]
     /// use std::collections::BinaryHeap;
     /// let mut heap: BinaryHeap<i32> = BinaryHeap::with_capacity(100);
     ///
@@ -974,7 +981,7 @@ impl<T> BinaryHeap<T> {
     /// assert!(heap.capacity() >= 10);
     /// ```
     #[inline]
-    #[unstable(feature = "shrink_to", reason = "new API", issue = "56431")]
+    #[stable(feature = "shrink_to", since = "1.56.0")]
     pub fn shrink_to(&mut self, min_capacity: usize) {
         self.data.shrink_to(min_capacity)
     }
@@ -1034,7 +1041,6 @@ impl<T> BinaryHeap<T> {
     ///
     /// assert_eq!(heap.len(), 2);
     /// ```
-    #[doc(alias = "length")]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn len(&self) -> usize {
         self.data.len()
@@ -1463,6 +1469,22 @@ impl<T: Ord> From<Vec<T>> for BinaryHeap<T> {
         let mut heap = BinaryHeap { data: vec };
         heap.rebuild();
         heap
+    }
+}
+
+#[stable(feature = "std_collections_from_array", since = "1.56.0")]
+impl<T: Ord, const N: usize> From<[T; N]> for BinaryHeap<T> {
+    /// ```
+    /// use std::collections::BinaryHeap;
+    ///
+    /// let mut h1 = BinaryHeap::from([1, 4, 2, 3]);
+    /// let mut h2: BinaryHeap<_> = [1, 4, 2, 3].into();
+    /// while let Some((a, b)) = h1.pop().zip(h2.pop()) {
+    ///     assert_eq!(a, b);
+    /// }
+    /// ```
+    fn from(arr: [T; N]) -> Self {
+        core::array::IntoIter::new(arr).collect()
     }
 }
 

@@ -7,7 +7,6 @@
 use std::convert::TryFrom;
 use std::fmt::Write;
 use std::num::NonZeroUsize;
-use std::ops::RangeInclusive;
 
 use rustc_data_structures::fx::FxHashSet;
 use rustc_hir as hir;
@@ -15,13 +14,15 @@ use rustc_middle::mir::interpret::InterpError;
 use rustc_middle::ty;
 use rustc_middle::ty::layout::TyAndLayout;
 use rustc_span::symbol::{sym, Symbol};
-use rustc_target::abi::{Abi, LayoutOf, Scalar as ScalarAbi, Size, VariantIdx, Variants};
+use rustc_target::abi::{
+    Abi, LayoutOf, Scalar as ScalarAbi, Size, VariantIdx, Variants, WrappingRange,
+};
 
 use std::hash::Hash;
 
 use super::{
     alloc_range, CheckInAllocMsg, GlobalAlloc, InterpCx, InterpResult, MPlaceTy, Machine,
-    MemPlaceMeta, OpTy, Scalar, ScalarMaybeUninit, ValueVisitor,
+    MemPlaceMeta, OpTy, ScalarMaybeUninit, ValueVisitor,
 };
 
 macro_rules! throw_validation_failure {
@@ -181,22 +182,10 @@ fn write_path(out: &mut String, path: &[PathElem]) {
     }
 }
 
-// Test if a range that wraps at overflow contains `test`
-fn wrapping_range_contains(r: &RangeInclusive<u128>, test: u128) -> bool {
-    let (lo, hi) = r.clone().into_inner();
-    if lo > hi {
-        // Wrapped
-        (..=hi).contains(&test) || (lo..).contains(&test)
-    } else {
-        // Normal
-        r.contains(&test)
-    }
-}
-
 // Formats such that a sentence like "expected something {}" to mean
 // "expected something <in the given range>" makes sense.
-fn wrapping_range_format(r: &RangeInclusive<u128>, max_hi: u128) -> String {
-    let (lo, hi) = r.clone().into_inner();
+fn wrapping_range_format(r: WrappingRange, max_hi: u128) -> String {
+    let WrappingRange { start: lo, end: hi } = r;
     assert!(hi <= max_hi);
     if lo > hi {
         format!("less or equal to {}, or greater or equal to {}", hi, lo)
@@ -324,7 +313,7 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
         let tail = self.ecx.tcx.struct_tail_erasing_lifetimes(pointee.ty, self.ecx.param_env);
         match tail.kind() {
             ty::Dynamic(..) => {
-                let vtable = meta.unwrap_meta();
+                let vtable = self.ecx.scalar_to_ptr(meta.unwrap_meta());
                 // Direct call to `check_ptr_access_align` checks alignment even on CTFE machines.
                 try_validation!(
                     self.ecx.memory.check_ptr_access_align(
@@ -335,8 +324,7 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
                     ),
                     self.path,
                     err_ub!(DanglingIntPointer(..)) |
-                    err_ub!(PointerUseAfterFree(..)) |
-                    err_unsup!(ReadBytesAsPointer) =>
+                    err_ub!(PointerUseAfterFree(..)) =>
                         { "dangling vtable pointer in wide pointer" },
                     err_ub!(AlignmentCheckFailed { .. }) =>
                         { "unaligned vtable pointer in wide pointer" },
@@ -347,8 +335,7 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
                     self.ecx.read_drop_type_from_vtable(vtable),
                     self.path,
                     err_ub!(DanglingIntPointer(..)) |
-                    err_ub!(InvalidFunctionPointer(..)) |
-                    err_unsup!(ReadBytesAsPointer) =>
+                    err_ub!(InvalidFunctionPointer(..)) =>
                         { "invalid drop function pointer in vtable (not pointing to a function)" },
                     err_ub!(InvalidVtableDropFn(..)) =>
                         { "invalid drop function pointer in vtable (function has incompatible signature)" },
@@ -437,8 +424,6 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
                 { "a dangling {} (address 0x{:x} is unallocated)", kind, i },
             err_ub!(PointerOutOfBounds { .. }) =>
                 { "a dangling {} (going beyond the bounds of its allocation)", kind },
-            err_unsup!(ReadBytesAsPointer) =>
-                { "a dangling {} (created from integer)", kind },
             // This cannot happen during const-eval (because interning already detects
             // dangling pointers), but it can happen in Miri.
             err_ub!(PointerUseAfterFree(..)) =>
@@ -448,17 +433,10 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
         if let Some(ref mut ref_tracking) = self.ref_tracking {
             // Proceed recursively even for ZST, no reason to skip them!
             // `!` is a ZST and we want to validate it.
-            // Normalize before handing `place` to tracking because that will
-            // check for duplicates.
-            let place = if size.bytes() > 0 {
-                self.ecx.force_mplace_ptr(place).expect("we already bounds-checked")
-            } else {
-                place
-            };
             // Skip validation entirely for some external statics
-            if let Scalar::Ptr(ptr) = place.ptr {
+            if let Ok((alloc_id, _offset, _ptr)) = self.ecx.memory.ptr_try_get_alloc(place.ptr) {
                 // not a ZST
-                let alloc_kind = self.ecx.tcx.get_global_alloc(ptr.alloc_id);
+                let alloc_kind = self.ecx.tcx.get_global_alloc(alloc_id);
                 if let Some(GlobalAlloc::Static(did)) = alloc_kind {
                     assert!(!self.ecx.tcx.is_thread_local_static(did));
                     assert!(self.ecx.tcx.is_static(did));
@@ -546,7 +524,7 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
                 // types below!
                 if self.ctfe_mode.is_some() {
                     // Integers/floats in CTFE: Must be scalar bits, pointers are dangerous
-                    let is_bits = value.check_init().map_or(false, |v| v.is_bits());
+                    let is_bits = value.check_init().map_or(false, |v| v.try_to_int().is_ok());
                     if !is_bits {
                         throw_validation_failure!(self.path,
                             { "{}", value } expected { "initialized plain (non-pointer) bytes" }
@@ -601,12 +579,11 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
                 // message below.
                 let value = value.to_scalar_or_uninit();
                 let _fn = try_validation!(
-                    value.check_init().and_then(|ptr| self.ecx.memory.get_fn(ptr)),
+                    value.check_init().and_then(|ptr| self.ecx.memory.get_fn(self.ecx.scalar_to_ptr(ptr))),
                     self.path,
                     err_ub!(DanglingIntPointer(..)) |
                     err_ub!(InvalidFunctionPointer(..)) |
-                    err_ub!(InvalidUninitBytes(None)) |
-                    err_unsup!(ReadBytesAsPointer) =>
+                    err_ub!(InvalidUninitBytes(None)) =>
                         { "{}", value } expected { "a function pointer" },
                 );
                 // FIXME: Check if the signature matches
@@ -646,8 +623,8 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
         scalar_layout: &ScalarAbi,
     ) -> InterpResult<'tcx> {
         let value = self.read_scalar(op)?;
-        let valid_range = &scalar_layout.valid_range;
-        let (lo, hi) = valid_range.clone().into_inner();
+        let valid_range = scalar_layout.valid_range.clone();
+        let WrappingRange { start: lo, end: hi } = valid_range;
         // Determine the allowed range
         // `max_hi` is as big as the size fits
         let max_hi = u128::MAX >> (128 - op.layout.size.bits());
@@ -664,8 +641,11 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
             err_ub!(InvalidUninitBytes(None)) => { "{}", value }
                 expected { "something {}", wrapping_range_format(valid_range, max_hi) },
         );
-        let bits = match value.to_bits_or_ptr(op.layout.size, self.ecx) {
-            Err(ptr) => {
+        let bits = match value.try_to_int() {
+            Err(_) => {
+                // So this is a pointer then, and casting to an int failed.
+                // Can only happen during CTFE.
+                let ptr = self.ecx.scalar_to_ptr(value);
                 if lo == 1 && hi == max_hi {
                     // Only null is the niche.  So make sure the ptr is NOT null.
                     if self.ecx.memory.ptr_may_be_null(ptr) {
@@ -690,10 +670,10 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
                     )
                 }
             }
-            Ok(data) => data,
+            Ok(int) => int.assert_bits(op.layout.size),
         };
         // Now compare. This is slightly subtle because this is a special "wrap-around" range.
-        if wrapping_range_contains(&valid_range, bits) {
+        if valid_range.contains(bits) {
             Ok(())
         } else {
             throw_validation_failure!(self.path,
@@ -832,7 +812,7 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValueVisitor<'mir, 'tcx, M>
     ) -> InterpResult<'tcx> {
         match op.layout.ty.kind() {
             ty::Str => {
-                let mplace = op.assert_mem_place(self.ecx); // strings are never immediate
+                let mplace = op.assert_mem_place(); // strings are never immediate
                 let len = mplace.len(self.ecx)?;
                 try_validation!(
                     self.ecx.memory.read_bytes(mplace.ptr, Size::from_bytes(len)),
@@ -853,7 +833,7 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValueVisitor<'mir, 'tcx, M>
                 // Optimized handling for arrays of integer/float type.
 
                 // Arrays cannot be immediate, slices are never immediate.
-                let mplace = op.assert_mem_place(self.ecx);
+                let mplace = op.assert_mem_place();
                 // This is the length of the array/slice.
                 let len = mplace.len(self.ecx)?;
                 // This is the element type size.
@@ -866,7 +846,7 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValueVisitor<'mir, 'tcx, M>
                 // types above, in `visit_primitive`.
                 // In run-time mode, we accept pointers in here.  This is actually more
                 // permissive than a per-element check would be, e.g., we accept
-                // an &[u8] that contains a pointer even though bytewise checking would
+                // a &[u8] that contains a pointer even though bytewise checking would
                 // reject it.  However, that's good: We don't inherently want
                 // to reject those pointers, we just do not have the machinery to
                 // talk about parts of a pointer.
@@ -939,9 +919,6 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
 
         // Construct a visitor
         let mut visitor = ValidityVisitor { path, ref_tracking, ctfe_mode, ecx: self };
-
-        // Try to cast to ptr *once* instead of all the time.
-        let op = self.force_op_ptr(&op).unwrap_or(*op);
 
         // Run it.
         match visitor.visit_value(&op) {

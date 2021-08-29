@@ -1,11 +1,7 @@
-// ignore-tidy-filelength
-// This file almost exclusively consists of the definition of `Iterator`. We
-// can't split that into multiple files.
-
 use crate::cmp::{self, Ordering};
 use crate::ops::{ControlFlow, Try};
 
-use super::super::TrustedRandomAccess;
+use super::super::TrustedRandomAccessNoCoerce;
 use super::super::{Chain, Cloned, Copied, Cycle, Enumerate, Filter, FilterMap, Fuse};
 use super::super::{FlatMap, Flatten};
 use super::super::{FromIterator, Intersperse, IntersperseWith, Product, Sum, Zip};
@@ -333,21 +329,22 @@ pub trait Iterator {
     /// regardless of the step given.
     ///
     /// Note 2: The time at which ignored elements are pulled is not fixed.
-    /// `StepBy` behaves like the sequence `next(), nth(step-1), nth(step-1), …`,
-    /// but is also free to behave like the sequence
-    /// `advance_n_and_return_first(step), advance_n_and_return_first(step), …`
+    /// `StepBy` behaves like the sequence `self.next()`, `self.nth(step-1)`,
+    /// `self.nth(step-1)`, …, but is also free to behave like the sequence
+    /// `advance_n_and_return_first(&mut self, step)`,
+    /// `advance_n_and_return_first(&mut self, step)`, …
     /// Which way is used may change for some iterators for performance reasons.
     /// The second way will advance the iterator earlier and may consume more items.
     ///
     /// `advance_n_and_return_first` is the equivalent of:
     /// ```
-    /// fn advance_n_and_return_first<I>(iter: &mut I, total_step: usize) -> Option<I::Item>
+    /// fn advance_n_and_return_first<I>(iter: &mut I, n: usize) -> Option<I::Item>
     /// where
     ///     I: Iterator,
     /// {
     ///     let next = iter.next();
-    ///     if total_step > 1 {
-    ///         iter.nth(total_step-2);
+    ///     if n > 1 {
+    ///         iter.nth(n - 2);
     ///     }
     ///     next
     /// }
@@ -693,7 +690,7 @@ pub trait Iterator {
     /// more idiomatic to use a `for` loop, but `for_each` may be more legible
     /// when processing items at the end of longer iterator chains. In some
     /// cases `for_each` may also be faster than a loop, because it will use
-    /// internal iteration on adaptors like `Chain`.
+    /// internal iteration on adapters like `Chain`.
     ///
     /// [`for`]: ../../book/ch03-05-control-flow.html#looping-through-a-collection-with-for
     ///
@@ -1292,7 +1289,7 @@ pub trait Iterator {
         Take::new(self, n)
     }
 
-    /// An iterator adaptor similar to [`fold`] that holds internal state and
+    /// An iterator adapter similar to [`fold`] that holds internal state and
     /// produces a new iterator.
     ///
     /// [`fold`]: Iterator::fold
@@ -1603,7 +1600,7 @@ pub trait Iterator {
 
     /// Borrows an iterator, rather than consuming it.
     ///
-    /// This is useful to allow applying iterator adaptors while still
+    /// This is useful to allow applying iterator adapters while still
     /// retaining ownership of the original iterator.
     ///
     /// # Examples
@@ -1960,8 +1957,8 @@ pub trait Iterator {
     /// assert_eq!(it.next(), Some(&40));
     /// ```
     ///
-    /// While you cannot `break` from a closure, the [`crate::ops::ControlFlow`]
-    /// type allows a similar idea:
+    /// While you cannot `break` from a closure, the [`ControlFlow`] type allows
+    /// a similar idea:
     ///
     /// ```
     /// use std::ops::ControlFlow;
@@ -2027,8 +2024,8 @@ pub trait Iterator {
     /// assert_eq!(it.next(), Some("stale_bread.json"));
     /// ```
     ///
-    /// The [`crate::ops::ControlFlow`] type can be used with this method for the
-    /// situations in which you'd use `break` and `continue` in a normal loop:
+    /// The [`ControlFlow`] type can be used with this method for the situations
+    /// in which you'd use `break` and `continue` in a normal loop:
     ///
     /// ```
     /// use std::ops::ControlFlow;
@@ -2077,7 +2074,7 @@ pub trait Iterator {
     /// to produce a single value from it.
     ///
     /// Note: `fold()`, and similar methods that traverse the entire iterator,
-    /// may not terminate for infinite iterators, even on traits for which a
+    /// might not terminate for infinite iterators, even on traits for which a
     /// result is determinable in finite time.
     ///
     /// Note: [`reduce()`] can be used to use the first element as the initial
@@ -2254,7 +2251,6 @@ pub trait Iterator {
     /// // we can still use `iter`, as there are more elements.
     /// assert_eq!(iter.next(), Some(&3));
     /// ```
-    #[doc(alias = "every")]
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     fn all<F>(&mut self, f: F) -> bool
@@ -2439,7 +2435,6 @@ pub trait Iterator {
     /// ```
     #[inline]
     #[unstable(feature = "try_find", reason = "new API", issue = "63178")]
-    #[cfg(not(bootstrap))]
     fn try_find<F, R, E>(&mut self, f: F) -> Result<Option<Self::Item>, E>
     where
         Self: Sized,
@@ -2447,45 +2442,19 @@ pub trait Iterator {
         R: Try<Output = bool>,
         // FIXME: This bound is rather strange, but means minimal breakage on nightly.
         // See #85115 for the issue tracking a holistic solution for this and try_map.
-        R: crate::ops::TryV2<Residual = Result<crate::convert::Infallible, E>>,
+        R: Try<Residual = Result<crate::convert::Infallible, E>>,
     {
         #[inline]
         fn check<F, T, R, E>(mut f: F) -> impl FnMut((), T) -> ControlFlow<Result<T, E>>
         where
             F: FnMut(&T) -> R,
             R: Try<Output = bool>,
-            R: crate::ops::TryV2<Residual = Result<crate::convert::Infallible, E>>,
+            R: Try<Residual = Result<crate::convert::Infallible, E>>,
         {
             move |(), x| match f(&x).branch() {
                 ControlFlow::Continue(false) => ControlFlow::CONTINUE,
                 ControlFlow::Continue(true) => ControlFlow::Break(Ok(x)),
                 ControlFlow::Break(Err(x)) => ControlFlow::Break(Err(x)),
-            }
-        }
-
-        self.try_fold((), check(f)).break_value().transpose()
-    }
-
-    /// We're bootstrapping.
-    #[inline]
-    #[unstable(feature = "try_find", reason = "new API", issue = "63178")]
-    #[cfg(bootstrap)]
-    fn try_find<F, R>(&mut self, f: F) -> Result<Option<Self::Item>, R::Error>
-    where
-        Self: Sized,
-        F: FnMut(&Self::Item) -> R,
-        R: Try<Output = bool>,
-    {
-        #[inline]
-        fn check<F, T, R>(mut f: F) -> impl FnMut((), T) -> ControlFlow<Result<T, R::Error>>
-        where
-            F: FnMut(&T) -> R,
-            R: Try<Output = bool>,
-        {
-            move |(), x| match f(&x).into_result() {
-                Ok(false) => ControlFlow::CONTINUE,
-                Ok(true) => ControlFlow::Break(Ok(x)),
-                Err(x) => ControlFlow::Break(Err(x)),
             }
         }
 
@@ -2872,6 +2841,14 @@ pub trait Iterator {
     ///
     /// assert_eq!(left, [1, 3]);
     /// assert_eq!(right, [2, 4]);
+    ///
+    /// // you can also unzip multiple nested tuples at once
+    /// let a = [(1, (2, 3)), (4, (5, 6))];
+    ///
+    /// let (x, (y, z)): (Vec<_>, (Vec<_>, Vec<_>)) = a.iter().cloned().unzip();
+    /// assert_eq!(x, [1, 4]);
+    /// assert_eq!(y, [2, 5]);
+    /// assert_eq!(z, [3, 6]);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     fn unzip<A, B, FromA, FromB>(self) -> (FromA, FromB)
@@ -2880,28 +2857,9 @@ pub trait Iterator {
         FromB: Default + Extend<B>,
         Self: Sized + Iterator<Item = (A, B)>,
     {
-        fn extend<'a, A, B>(
-            ts: &'a mut impl Extend<A>,
-            us: &'a mut impl Extend<B>,
-        ) -> impl FnMut((), (A, B)) + 'a {
-            move |(), (t, u)| {
-                ts.extend_one(t);
-                us.extend_one(u);
-            }
-        }
-
-        let mut ts: FromA = Default::default();
-        let mut us: FromB = Default::default();
-
-        let (lower_bound, _) = self.size_hint();
-        if lower_bound > 0 {
-            ts.extend_reserve(lower_bound);
-            us.extend_reserve(lower_bound);
-        }
-
-        self.fold((), extend(&mut ts, &mut us));
-
-        (ts, us)
+        let mut unzipped: (FromA, FromB) = Default::default();
+        unzipped.extend(self);
+        unzipped
     }
 
     /// Creates an iterator which copies all of its elements.
@@ -3483,7 +3441,7 @@ pub trait Iterator {
         self.map(f).is_sorted()
     }
 
-    /// See [TrustedRandomAccess]
+    /// See [TrustedRandomAccess][super::super::TrustedRandomAccess]
     // The unusual name is to avoid name collisions in method resolution
     // see #76479.
     #[inline]
@@ -3491,7 +3449,7 @@ pub trait Iterator {
     #[unstable(feature = "trusted_random_access", issue = "none")]
     unsafe fn __iterator_get_unchecked(&mut self, _idx: usize) -> Self::Item
     where
-        Self: TrustedRandomAccess,
+        Self: TrustedRandomAccessNoCoerce,
     {
         unreachable!("Always specialized");
     }

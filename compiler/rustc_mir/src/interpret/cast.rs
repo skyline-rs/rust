@@ -57,7 +57,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                         .ok_or_else(|| err_inval!(TooGeneric))?;
 
                         let fn_ptr = self.memory.create_fn_alloc(FnVal::Instance(instance));
-                        self.write_scalar(fn_ptr, dest)?;
+                        self.write_pointer(fn_ptr, dest)?;
                     }
                     _ => span_bug!(self.cur_span(), "reify fn pointer on {:?}", src.layout.ty),
                 }
@@ -88,7 +88,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                             ty::ClosureKind::FnOnce,
                         );
                         let fn_ptr = self.memory.create_fn_alloc(FnVal::Instance(instance));
-                        self.write_scalar(fn_ptr, dest)?;
+                        self.write_pointer(fn_ptr, dest)?;
                     }
                     _ => span_bug!(self.cur_span(), "closure fn pointer on {:?}", src.layout.ty),
                 }
@@ -175,7 +175,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         // (a) cast a raw ptr to usize, or
         // (b) cast from an integer-like (including bool, char, enums).
         // In both cases we want the bits.
-        let bits = self.force_bits(src.to_scalar()?, src.layout.size)?;
+        let bits = src.to_scalar()?.to_bits(src.layout.size)?;
         Ok(self.cast_from_scalar(bits, src.layout, cast_ty).into())
     }
 
@@ -269,18 +269,33 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                     Immediate::new_slice(ptr, length.eval_usize(*self.tcx, self.param_env), self);
                 self.write_immediate(val, dest)
             }
-            (&ty::Dynamic(..), &ty::Dynamic(..)) => {
-                // For now, upcasts are limited to changes in marker
-                // traits, and hence never actually require an actual
-                // change to the vtable.
+            (&ty::Dynamic(ref data_a, ..), &ty::Dynamic(ref data_b, ..)) => {
                 let val = self.read_immediate(src)?;
-                self.write_immediate(*val, dest)
+                if data_a.principal_def_id() == data_b.principal_def_id() {
+                    return self.write_immediate(*val, dest);
+                }
+                // trait upcasting coercion
+                let vptr_entry_idx = self.tcx.vtable_trait_upcasting_coercion_new_vptr_slot((
+                    src_pointee_ty,
+                    dest_pointee_ty,
+                ));
+
+                if let Some(entry_idx) = vptr_entry_idx {
+                    let entry_idx = u64::try_from(entry_idx).unwrap();
+                    let (old_data, old_vptr) = val.to_scalar_pair()?;
+                    let old_vptr = self.scalar_to_ptr(old_vptr);
+                    let new_vptr = self
+                        .read_new_vtable_after_trait_upcasting_from_vtable(old_vptr, entry_idx)?;
+                    self.write_immediate(Immediate::new_dyn_trait(old_data, new_vptr, self), dest)
+                } else {
+                    self.write_immediate(*val, dest)
+                }
             }
             (_, &ty::Dynamic(ref data, _)) => {
                 // Initial cast from sized to dyn trait
                 let vtable = self.get_vtable(src_pointee_ty, data.principal())?;
                 let ptr = self.read_immediate(src)?.to_scalar()?;
-                let val = Immediate::new_dyn_trait(ptr, vtable);
+                let val = Immediate::new_dyn_trait(ptr, vtable, &*self.tcx);
                 self.write_immediate(val, dest)
             }
 

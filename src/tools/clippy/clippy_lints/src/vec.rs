@@ -19,14 +19,14 @@ pub struct UselessVec {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for usage of `&vec![..]` when using `&[..]` would
+    /// ### What it does
+    /// Checks for usage of `&vec![..]` when using `&[..]` would
     /// be possible.
     ///
-    /// **Why is this bad?** This is less efficient.
+    /// ### Why is this bad?
+    /// This is less efficient.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// # fn foo(my_vec: &[u8]) {}
     ///
@@ -49,8 +49,8 @@ impl<'tcx> LateLintPass<'tcx> for UselessVec {
         if_chain! {
             if let ty::Ref(_, ty, _) = cx.typeck_results().expr_ty_adjusted(expr).kind();
             if let ty::Slice(..) = ty.kind();
-            if let ExprKind::AddrOf(BorrowKind::Ref, mutability, addressee) = expr.kind;
-            if let Some(vec_args) = higher::vec_macro(cx, addressee);
+            if let ExprKind::AddrOf(BorrowKind::Ref, mutability, ref addressee) = expr.kind;
+            if let Some(vec_args) = higher::VecArgs::hir(cx, addressee);
             then {
                 self.check_vec_macro(cx, &vec_args, mutability, expr.span);
             }
@@ -58,8 +58,8 @@ impl<'tcx> LateLintPass<'tcx> for UselessVec {
 
         // search for `for _ in vec![…]`
         if_chain! {
-            if let Some((_, arg, _, _)) = higher::for_loop(expr);
-            if let Some(vec_args) = higher::vec_macro(cx, arg);
+            if let Some(higher::ForLoop { arg, .. }) = higher::ForLoop::hir(expr);
+            if let Some(vec_args) = higher::VecArgs::hir(cx, arg);
             if is_copy(cx, vec_type(cx.typeck_results().expr_ty_adjusted(arg)));
             then {
                 // report the error around the `vec!` not inside `<std macros>:`

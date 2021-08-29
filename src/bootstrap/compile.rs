@@ -2,8 +2,8 @@
 //! library.
 //!
 //! This module contains some of the real meat in the rustbuild build system
-//! which is where Cargo is used to compiler the standard library, libtest, and
-//! compiler. This module is also responsible for assembling the sysroot as it
+//! which is where Cargo is used to compile the standard library, libtest, and
+//! the compiler. This module is also responsible for assembling the sysroot as it
 //! goes along from the output of the previous stage.
 
 use std::borrow::Cow;
@@ -23,7 +23,7 @@ use serde::Deserialize;
 use crate::builder::Cargo;
 use crate::builder::{Builder, Kind, RunConfig, ShouldRun, Step};
 use crate::cache::{Interned, INTERNER};
-use crate::config::TargetSelection;
+use crate::config::{LlvmLibunwind, TargetSelection};
 use crate::dist;
 use crate::native;
 use crate::tool::SourceType;
@@ -78,6 +78,8 @@ impl Step for Std {
             builder.ensure(StdLink { compiler, target_compiler: compiler, target });
             return;
         }
+
+        builder.update_submodule(&Path::new("library").join("stdarch"));
 
         let mut target_deps = builder.ensure(StartupObjects { compiler, target });
 
@@ -230,6 +232,18 @@ fn copy_self_contained_objects(
             builder.copy(&src, &target);
             target_deps.push((target, DependencyType::TargetSelfContained));
         }
+    }
+
+    if target.contains("musl")
+        || target.contains("x86_64-fortanix-unknown-sgx")
+        || builder.config.llvm_libunwind == LlvmLibunwind::InTree
+            && (target.contains("linux") || target.contains("fuchsia"))
+    {
+        let libunwind_path = builder.ensure(native::Libunwind { target });
+        let libunwind_source = libunwind_path.join("libunwind.a");
+        let libunwind_target = libdir_self_contained.join("libunwind.a");
+        builder.copy(&libunwind_source, &libunwind_target);
+        target_deps.push((libunwind_target, DependencyType::TargetSelfContained));
     }
 
     target_deps
@@ -804,6 +818,10 @@ impl Step for CodegenBackend {
 
         let tmp_stamp = out_dir.join(".tmp.stamp");
 
+        builder.info(&format!(
+            "Building stage{} codegen backend {} ({} -> {})",
+            compiler.stage, backend, &compiler.host, target
+        ));
         let files = run_cargo(builder, cargo, vec![], &tmp_stamp, vec![], false);
         if builder.config.dry_run {
             return;
@@ -1115,6 +1133,10 @@ impl Step for Assemble {
                 &lld_install.join("bin").join(&src_exe),
                 &gcc_ld_dir.join(exe("ld", target_compiler.host)),
             );
+            builder.copy(
+                &lld_install.join("bin").join(&src_exe),
+                &gcc_ld_dir.join(exe("ld64", target_compiler.host)),
+            );
         }
 
         // Similarly, copy `llvm-dwp` into libdir for Split DWARF. Only copy it when the LLVM
@@ -1366,7 +1388,7 @@ pub fn stream_cargo(
 
     // Make sure Cargo actually succeeded after we read all of its stdout.
     let status = t!(child.wait());
-    if !status.success() {
+    if builder.is_verbose() && !status.success() {
         eprintln!(
             "command did not execute successfully: {:?}\n\
                   expected success, got: {}",

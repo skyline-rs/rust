@@ -27,7 +27,7 @@ pub(super) fn check<'tcx>(
         start: Some(start),
         end: Some(end),
         limits,
-    }) = higher::range(arg)
+    }) = higher::Range::hir(arg)
     {
         // the var must be a single name
         if let PatKind::Binding(_, canonical_id, _, _) = pat.kind {
@@ -118,7 +118,7 @@ fn build_manual_memcpy_suggestion<'tcx>(
     let print_limit = |end: &Expr<'_>, end_str: &str, base: &Expr<'_>, sugg: MinifyingSugg<'static>| {
         if_chain! {
             if let ExprKind::MethodCall(method, _, len_args, _) = end.kind;
-            if method.ident.name == sym!(len);
+            if method.ident.name == sym::len;
             if len_args.len() == 1;
             if let Some(arg) = len_args.get(0);
             if path_to_local(arg) == path_to_local(base);
@@ -268,7 +268,7 @@ impl std::ops::Sub<&MinifyingSugg<'static>> for MinifyingSugg<'static> {
     }
 }
 
-/// a wrapper around `MinifyingSugg`, which carries a operator like currying
+/// a wrapper around `MinifyingSugg`, which carries an operator like currying
 /// so that the suggested code become more efficient (e.g. `foo + -bar` `foo - bar`).
 struct Offset {
     value: MinifyingSugg<'static>,

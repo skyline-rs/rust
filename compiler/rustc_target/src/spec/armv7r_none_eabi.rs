@@ -11,14 +11,16 @@ pub fn target() -> Target {
         arch: "arm".to_string(),
 
         options: TargetOptions {
+            abi: "eabi".to_string(),
             linker_flavor: LinkerFlavor::Lld(LldFlavor::Ld),
             executables: true,
             linker: Some("rust-lld".to_owned()),
             relocation_model: RelocModel::Static,
             panic_strategy: PanicStrategy::Abort,
             max_atomic_width: Some(32),
-            unsupported_abis: super::arm_base::unsupported_abis(),
             emit_debug_gdb_scripts: false,
+            // GCC and Clang default to 8 for arm-none here
+            c_enum_min_bits: 8,
             ..Default::default()
         },
     }

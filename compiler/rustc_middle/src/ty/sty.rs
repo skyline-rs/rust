@@ -5,7 +5,6 @@
 use self::TyKind::*;
 
 use crate::infer::canonical::Canonical;
-use crate::ty::fold::BoundVarsCollector;
 use crate::ty::fold::ValidateBoundVars;
 use crate::ty::subst::{GenericArg, InternalSubsts, Subst, SubstsRef};
 use crate::ty::InferTy::{self, *};
@@ -240,7 +239,7 @@ static_assert_size!(TyKind<'_>, 32);
 ///   implements `CK<(u32, u32), Output = u32>`, where `CK` is the trait
 ///   specified above.
 /// - U is a type parameter representing the types of its upvars, tupled up
-///   (borrowed, if appropriate; that is, if an U field represents a by-ref upvar,
+///   (borrowed, if appropriate; that is, if a U field represents a by-ref upvar,
 ///    and the up-var has the type `Foo`, then that field of U will be `&Foo`).
 ///
 /// So, for example, given this function:
@@ -877,7 +876,10 @@ impl<'tcx> PolyTraitRef<'tcx> {
     }
 
     pub fn to_poly_trait_predicate(&self) -> ty::PolyTraitPredicate<'tcx> {
-        self.map_bound(|trait_ref| ty::TraitPredicate { trait_ref })
+        self.map_bound(|trait_ref| ty::TraitPredicate {
+            trait_ref,
+            constness: ty::BoundConstness::NotConst,
+        })
     }
 }
 
@@ -966,15 +968,8 @@ where
     /// binder. This is commonly used to 'inject' a value T into a
     /// different binding level.
     pub fn dummy(value: T) -> Binder<'tcx, T> {
-        debug_assert!(!value.has_escaping_bound_vars());
+        assert!(!value.has_escaping_bound_vars());
         Binder(value, ty::List::empty())
-    }
-
-    /// Wraps `value` in a binder, binding higher-ranked vars (if any).
-    pub fn bind(value: T, tcx: TyCtxt<'tcx>) -> Binder<'tcx, T> {
-        let mut collector = BoundVarsCollector::new();
-        value.visit_with(&mut collector);
-        Binder(value, collector.into_vars(tcx))
     }
 
     pub fn bind_with_vars(value: T, vars: &'tcx List<BoundVariableKind>) -> Binder<'tcx, T> {
@@ -1328,7 +1323,7 @@ pub type Region<'tcx> = &'tcx RegionKind;
 /// These are regions that are stored behind a binder and must be substituted
 /// with some concrete region before being used. There are two kind of
 /// bound regions: early-bound, which are bound in an item's `Generics`,
-/// and are substituted by a `InternalSubsts`, and late-bound, which are part of
+/// and are substituted by an `InternalSubsts`, and late-bound, which are part of
 /// higher-ranked types (e.g., `for<'a> fn(&'a ())`), and are substituted by
 /// the likes of `liberate_late_bound_regions`. The distinction exists
 /// because higher-ranked lifetimes aren't supported in all places. See [1][2].
@@ -1476,7 +1471,7 @@ pub type PolyExistentialProjection<'tcx> = Binder<'tcx, ExistentialProjection<'t
 impl<'tcx> ExistentialProjection<'tcx> {
     /// Extracts the underlying existential trait reference from this projection.
     /// For example, if this is a projection of `exists T. <T as Iterator>::Item == X`,
-    /// then this function would return a `exists T. T: Iterator` existential trait
+    /// then this function would return an `exists T. T: Iterator` existential trait
     /// reference.
     pub fn trait_ref(&self, tcx: TyCtxt<'tcx>) -> ty::ExistentialTraitRef<'tcx> {
         let def_id = tcx.associated_item(self.item_def_id).container.id();
@@ -1570,26 +1565,26 @@ impl RegionKind {
 
         match *self {
             ty::ReVar(..) => {
-                flags = flags | TypeFlags::HAS_FREE_REGIONS;
-                flags = flags | TypeFlags::HAS_FREE_LOCAL_REGIONS;
+                flags = flags | TypeFlags::HAS_KNOWN_FREE_REGIONS;
+                flags = flags | TypeFlags::HAS_KNOWN_FREE_LOCAL_REGIONS;
                 flags = flags | TypeFlags::HAS_RE_INFER;
             }
             ty::RePlaceholder(..) => {
-                flags = flags | TypeFlags::HAS_FREE_REGIONS;
-                flags = flags | TypeFlags::HAS_FREE_LOCAL_REGIONS;
+                flags = flags | TypeFlags::HAS_KNOWN_FREE_REGIONS;
+                flags = flags | TypeFlags::HAS_KNOWN_FREE_LOCAL_REGIONS;
                 flags = flags | TypeFlags::HAS_RE_PLACEHOLDER;
             }
             ty::ReEarlyBound(..) => {
-                flags = flags | TypeFlags::HAS_FREE_REGIONS;
-                flags = flags | TypeFlags::HAS_FREE_LOCAL_REGIONS;
-                flags = flags | TypeFlags::HAS_RE_PARAM;
+                flags = flags | TypeFlags::HAS_KNOWN_FREE_REGIONS;
+                flags = flags | TypeFlags::HAS_KNOWN_FREE_LOCAL_REGIONS;
+                flags = flags | TypeFlags::HAS_KNOWN_RE_PARAM;
             }
             ty::ReFree { .. } => {
-                flags = flags | TypeFlags::HAS_FREE_REGIONS;
-                flags = flags | TypeFlags::HAS_FREE_LOCAL_REGIONS;
+                flags = flags | TypeFlags::HAS_KNOWN_FREE_REGIONS;
+                flags = flags | TypeFlags::HAS_KNOWN_FREE_LOCAL_REGIONS;
             }
             ty::ReEmpty(_) | ty::ReStatic => {
-                flags = flags | TypeFlags::HAS_FREE_REGIONS;
+                flags = flags | TypeFlags::HAS_KNOWN_FREE_REGIONS;
             }
             ty::ReLateBound(..) => {
                 flags = flags | TypeFlags::HAS_RE_LATE_BOUND;
@@ -2189,7 +2184,7 @@ impl<'tcx> TyS<'tcx> {
 /// a miscompilation or unsoundness.
 ///
 /// When in doubt, use `VarianceDiagInfo::default()`
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum VarianceDiagInfo<'tcx> {
     /// No additional information - this is the default.
     /// We will not add any additional information to error messages.
@@ -2208,7 +2203,7 @@ pub enum VarianceDiagInfo<'tcx> {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum VarianceDiagMutKind {
     /// A mutable raw pointer (`*mut T`)
     RawPtr,

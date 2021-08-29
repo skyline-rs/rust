@@ -3,6 +3,7 @@
 //! This lint is **warn** by default
 
 use clippy_utils::diagnostics::{span_lint, span_lint_and_sugg};
+use clippy_utils::higher;
 use clippy_utils::source::snippet_with_applicability;
 use clippy_utils::sugg::Sugg;
 use clippy_utils::{is_else_clause, is_expn_of};
@@ -15,17 +16,20 @@ use rustc_span::source_map::Spanned;
 use rustc_span::Span;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for expressions of the form `if c { true } else {
+    /// ### What it does
+    /// Checks for expressions of the form `if c { true } else {
     /// false }` (or vice versa) and suggests using the condition directly.
     ///
-    /// **Why is this bad?** Redundant code.
+    /// ### Why is this bad?
+    /// Redundant code.
     ///
-    /// **Known problems:** Maybe false positives: Sometimes, the two branches are
+    /// ### Known problems
+    /// Maybe false positives: Sometimes, the two branches are
     /// painstakingly documented (which we, of course, do not detect), so they *may*
     /// have some value. Even then, the documentation can be rewritten to match the
     /// shorter code.
     ///
-    /// **Example:**
+    /// ### Example
     /// ```rust,ignore
     /// if x {
     ///     false
@@ -43,15 +47,15 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for expressions of the form `x == true`,
+    /// ### What it does
+    /// Checks for expressions of the form `x == true`,
     /// `x != true` and order comparisons such as `x < true` (or vice versa) and
     /// suggest using the variable directly.
     ///
-    /// **Why is this bad?** Unnecessary code.
+    /// ### Why is this bad?
+    /// Unnecessary code.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust,ignore
     /// if x == true {}
     /// if y == false {}
@@ -71,10 +75,18 @@ declare_lint_pass!(NeedlessBool => [NEEDLESS_BOOL]);
 impl<'tcx> LateLintPass<'tcx> for NeedlessBool {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) {
         use self::Expression::{Bool, RetBool};
-        if let ExprKind::If(pred, then_block, Some(else_expr)) = e.kind {
+        if e.span.from_expansion() {
+            return;
+        }
+        if let Some(higher::If {
+            cond,
+            then,
+            r#else: Some(r#else),
+        }) = higher::If::hir(e)
+        {
             let reduce = |ret, not| {
                 let mut applicability = Applicability::MachineApplicable;
-                let snip = Sugg::hir_with_applicability(cx, pred, "<predicate>", &mut applicability);
+                let snip = Sugg::hir_with_applicability(cx, cond, "<predicate>", &mut applicability);
                 let mut snip = if not { !snip } else { snip };
 
                 if ret {
@@ -95,8 +107,8 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessBool {
                     applicability,
                 );
             };
-            if let ExprKind::Block(then_block, _) = then_block.kind {
-                match (fetch_bool_block(then_block), fetch_bool_expr(else_expr)) {
+            if let ExprKind::Block(then, _) = then.kind {
+                match (fetch_bool_block(then), fetch_bool_expr(r#else)) {
                     (RetBool(true), RetBool(true)) | (Bool(true), Bool(true)) => {
                         span_lint(
                             cx,

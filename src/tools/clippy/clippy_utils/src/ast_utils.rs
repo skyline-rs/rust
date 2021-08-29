@@ -47,9 +47,14 @@ pub fn eq_pat(l: &Pat, r: &Pat) -> bool {
         | (Ref(l, Mutability::Mut), Ref(r, Mutability::Mut)) => eq_pat(l, r),
         (Tuple(l), Tuple(r)) | (Slice(l), Slice(r)) => over(l, r, |l, r| eq_pat(l, r)),
         (Path(lq, lp), Path(rq, rp)) => both(lq, rq, |l, r| eq_qself(l, r)) && eq_path(lp, rp),
-        (TupleStruct(lqself, lp, lfs), TupleStruct(rqself, rp, rfs)) => eq_maybe_qself(lqself, rqself) && eq_path(lp, rp) && over(lfs, rfs, |l, r| eq_pat(l, r)),
+        (TupleStruct(lqself, lp, lfs), TupleStruct(rqself, rp, rfs)) => {
+            eq_maybe_qself(lqself, rqself) && eq_path(lp, rp) && over(lfs, rfs, |l, r| eq_pat(l, r))
+        },
         (Struct(lqself, lp, lfs, lr), Struct(rqself, rp, rfs, rr)) => {
-            lr == rr && eq_maybe_qself(lqself, rqself) &&eq_path(lp, rp) && unordered_over(lfs, rfs, |lf, rf| eq_field_pat(lf, rf))
+            lr == rr
+                && eq_maybe_qself(lqself, rqself)
+                && eq_path(lp, rp)
+                && unordered_over(lfs, rfs, |lf, rf| eq_field_pat(lf, rf))
         },
         (Or(ls), Or(rs)) => unordered_over(ls, rs, |l, r| eq_pat(l, r)),
         (MacCall(l), MacCall(r)) => eq_mac_call(l, r),
@@ -82,7 +87,7 @@ pub fn eq_maybe_qself(l: &Option<QSelf>, r: &Option<QSelf>) -> bool {
     match (l, r) {
         (Some(l), Some(r)) => eq_qself(l, r),
         (None, None) => true,
-        _ => false
+        _ => false,
     }
 }
 
@@ -153,7 +158,7 @@ pub fn eq_expr(l: &Expr, r: &Expr) -> bool {
         (Unary(lo, l), Unary(ro, r)) => mem::discriminant(lo) == mem::discriminant(ro) && eq_expr(l, r),
         (Lit(l), Lit(r)) => l.kind == r.kind,
         (Cast(l, lt), Cast(r, rt)) | (Type(l, lt), Type(r, rt)) => eq_expr(l, r) && eq_ty(lt, rt),
-        (Let(lp, le), Let(rp, re)) => eq_pat(lp, rp) && eq_expr(le, re),
+        (Let(lp, le, _), Let(rp, re, _)) => eq_pat(lp, rp) && eq_expr(le, re),
         (If(lc, lt, le), If(rc, rt, re)) => eq_expr(lc, rc) && eq_block(lt, rt) && eq_expr_opt(le, re),
         (While(lc, lt, ll), While(rc, rt, rl)) => eq_label(ll, rl) && eq_expr(lc, rc) && eq_block(lt, rt),
         (ForLoop(lp, li, lt, ll), ForLoop(rp, ri, rt, rl)) => {

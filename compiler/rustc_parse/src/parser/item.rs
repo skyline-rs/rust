@@ -221,7 +221,7 @@ impl<'a> Parser<'a> {
         } else if self.check_fn_front_matter(def_final) {
             // FUNCTION ITEM
             let (ident, sig, generics, body) = self.parse_fn(attrs, req_name, lo)?;
-            (ident, ItemKind::Fn(box FnKind(def(), sig, generics, body)))
+            (ident, ItemKind::Fn(Box::new(FnKind(def(), sig, generics, body))))
         } else if self.eat_keyword(kw::Extern) {
             if self.eat_keyword(kw::Crate) {
                 // EXTERN CRATE
@@ -548,7 +548,7 @@ impl<'a> Parser<'a> {
                 };
                 let trait_ref = TraitRef { path, ref_id: ty_first.id };
 
-                ItemKind::Impl(box ImplKind {
+                ItemKind::Impl(Box::new(ImplKind {
                     unsafety,
                     polarity,
                     defaultness,
@@ -557,11 +557,11 @@ impl<'a> Parser<'a> {
                     of_trait: Some(trait_ref),
                     self_ty: ty_second,
                     items: impl_items,
-                })
+                }))
             }
             None => {
                 // impl Type
-                ItemKind::Impl(box ImplKind {
+                ItemKind::Impl(Box::new(ImplKind {
                     unsafety,
                     polarity,
                     defaultness,
@@ -570,7 +570,7 @@ impl<'a> Parser<'a> {
                     of_trait: None,
                     self_ty: ty_first,
                     items: impl_items,
-                })
+                }))
             }
         };
 
@@ -710,7 +710,7 @@ impl<'a> Parser<'a> {
             // It's a normal trait.
             tps.where_clause = self.parse_where_clause()?;
             let items = self.parse_item_list(attrs, |p| p.parse_trait_item(ForceCollect::No))?;
-            Ok((ident, ItemKind::Trait(box TraitKind(is_auto, unsafety, tps, bounds, items))))
+            Ok((ident, ItemKind::Trait(Box::new(TraitKind(is_auto, unsafety, tps, bounds, items)))))
         }
     }
 
@@ -769,7 +769,7 @@ impl<'a> Parser<'a> {
         let default = if self.eat(&token::Eq) { Some(self.parse_ty()?) } else { None };
         self.expect_semi()?;
 
-        Ok((ident, ItemKind::TyAlias(box TyAliasKind(def, generics, bounds, default))))
+        Ok((ident, ItemKind::TyAlias(Box::new(TyAliasKind(def, generics, bounds, default)))))
     }
 
     /// Parses a `UseTree`.
@@ -1107,8 +1107,7 @@ impl<'a> Parser<'a> {
                 e
             })?;
 
-        let enum_definition =
-            EnumDef { variants: variants.into_iter().filter_map(|v| v).collect() };
+        let enum_definition = EnumDef { variants: variants.into_iter().flatten().collect() };
         Ok((id, ItemKind::Enum(enum_definition, generics)))
     }
 
@@ -1715,13 +1714,11 @@ impl<'a> Parser<'a> {
                     // the AST for typechecking.
                     err.span_label(ident.span, "while parsing this `fn`");
                     err.emit();
-                    (Vec::new(), None)
                 } else {
                     return Err(err);
                 }
-            } else {
-                unreachable!()
             }
+            (Vec::new(), None)
         };
         attrs.extend(inner_attrs);
         Ok(body)
@@ -1771,8 +1768,14 @@ impl<'a> Parser<'a> {
     pub(super) fn parse_fn_front_matter(&mut self) -> PResult<'a, FnHeader> {
         let sp_start = self.token.span;
         let constness = self.parse_constness();
+
+        let async_start_sp = self.token.span;
         let asyncness = self.parse_asyncness();
+
+        let unsafe_start_sp = self.token.span;
         let unsafety = self.parse_unsafety();
+
+        let ext_start_sp = self.token.span;
         let ext = self.parse_extern();
 
         if let Async::Yes { span, .. } = asyncness {
@@ -1787,11 +1790,44 @@ impl<'a> Parser<'a> {
                 Ok(true) => {}
                 Ok(false) => unreachable!(),
                 Err(mut err) => {
+                    // Qualifier keywords ordering check
+
+                    // This will allow the machine fix to directly place the keyword in the correct place
+                    let current_qual_sp = if self.check_keyword(kw::Const) {
+                        Some(async_start_sp)
+                    } else if self.check_keyword(kw::Async) {
+                        Some(unsafe_start_sp)
+                    } else if self.check_keyword(kw::Unsafe) {
+                        Some(ext_start_sp)
+                    } else {
+                        None
+                    };
+
+                    if let Some(current_qual_sp) = current_qual_sp {
+                        let current_qual_sp = current_qual_sp.to(self.prev_token.span);
+                        if let Ok(current_qual) = self.span_to_snippet(current_qual_sp) {
+                            let invalid_qual_sp = self.token.uninterpolated_span();
+                            let invalid_qual = self.span_to_snippet(invalid_qual_sp).unwrap();
+
+                            err.span_suggestion(
+                                current_qual_sp.to(invalid_qual_sp),
+                                &format!("`{}` must come before `{}`", invalid_qual, current_qual),
+                                format!("{} {}", invalid_qual, current_qual),
+                                Applicability::MachineApplicable,
+                            ).note("keyword order for functions declaration is `default`, `pub`, `const`, `async`, `unsafe`, `extern`");
+                        }
+                    }
                     // Recover incorrect visibility order such as `async pub`.
-                    if self.check_keyword(kw::Pub) {
+                    else if self.check_keyword(kw::Pub) {
                         let sp = sp_start.to(self.prev_token.span);
                         if let Ok(snippet) = self.span_to_snippet(sp) {
-                            let vis = self.parse_visibility(FollowedByType::No)?;
+                            let vis = match self.parse_visibility(FollowedByType::No) {
+                                Ok(v) => v,
+                                Err(mut d) => {
+                                    d.cancel();
+                                    return Err(err);
+                                }
+                            };
                             let vs = pprust::vis_to_string(&vis);
                             let vs = vs.trim_end();
                             err.span_suggestion(

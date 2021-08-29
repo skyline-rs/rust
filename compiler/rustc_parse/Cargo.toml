@@ -1,5 +1,4 @@
 [package]
-authors = ["The Rust Project Developers"]
 name = "rustc_parse"
 version = "0.0.0"
 edition = "2018"
@@ -19,4 +18,3 @@ rustc_session = { path = "../rustc_session" }
 rustc_span = { path = "../rustc_span" }
 rustc_ast = { path = "../rustc_ast" }
 unicode-normalization = "0.1.11"
-smallvec = { version = "1.6.1", features = ["union", "may_dangle"] }

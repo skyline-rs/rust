@@ -72,6 +72,7 @@ pub trait BuilderMethods<'a, 'tcx>:
     );
     fn invoke(
         &mut self,
+        llty: Self::Type,
         llfn: Self::Value,
         args: &[Self::Value],
         then: Self::BasicBlock,
@@ -137,9 +138,15 @@ pub trait BuilderMethods<'a, 'tcx>:
     fn dynamic_alloca(&mut self, ty: Self::Type, align: Align) -> Self::Value;
     fn array_alloca(&mut self, ty: Self::Type, len: Self::Value, align: Align) -> Self::Value;
 
-    fn load(&mut self, ptr: Self::Value, align: Align) -> Self::Value;
-    fn volatile_load(&mut self, ptr: Self::Value) -> Self::Value;
-    fn atomic_load(&mut self, ptr: Self::Value, order: AtomicOrdering, size: Size) -> Self::Value;
+    fn load(&mut self, ty: Self::Type, ptr: Self::Value, align: Align) -> Self::Value;
+    fn volatile_load(&mut self, ty: Self::Type, ptr: Self::Value) -> Self::Value;
+    fn atomic_load(
+        &mut self,
+        ty: Self::Type,
+        ptr: Self::Value,
+        order: AtomicOrdering,
+        size: Size,
+    ) -> Self::Value;
     fn load_operand(&mut self, place: PlaceRef<'tcx, Self::Value>)
     -> OperandRef<'tcx, Self::Value>;
 
@@ -170,9 +177,14 @@ pub trait BuilderMethods<'a, 'tcx>:
         size: Size,
     );
 
-    fn gep(&mut self, ptr: Self::Value, indices: &[Self::Value]) -> Self::Value;
-    fn inbounds_gep(&mut self, ptr: Self::Value, indices: &[Self::Value]) -> Self::Value;
-    fn struct_gep(&mut self, ptr: Self::Value, idx: u64) -> Self::Value;
+    fn gep(&mut self, ty: Self::Type, ptr: Self::Value, indices: &[Self::Value]) -> Self::Value;
+    fn inbounds_gep(
+        &mut self,
+        ty: Self::Type,
+        ptr: Self::Value,
+        indices: &[Self::Value],
+    ) -> Self::Value;
+    fn struct_gep(&mut self, ty: Self::Type, ptr: Self::Value, idx: u64) -> Self::Value;
 
     fn trunc(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value;
     fn sext(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value;
@@ -292,6 +304,7 @@ pub trait BuilderMethods<'a, 'tcx>:
 
     fn call(
         &mut self,
+        llty: Self::Type,
         llfn: Self::Value,
         args: &[Self::Value],
         funclet: Option<&Self::Funclet>,

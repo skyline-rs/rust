@@ -13,7 +13,8 @@ use rustc_span::source_map::Span;
 use std::iter;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for patterns that aren't exact representations of the types
+    /// ### What it does
+    /// Checks for patterns that aren't exact representations of the types
     /// they are applied to.
     ///
     /// To satisfy this lint, you will have to adjust either the expression that is matched
@@ -32,14 +33,12 @@ declare_clippy_lint! {
     /// this lint can still be used to highlight areas of interest and ensure a good understanding
     /// of ownership semantics.
     ///
-    /// **Why is this bad?** It isn't bad in general. But in some contexts it can be desirable
+    /// ### Why is this bad?
+    /// It isn't bad in general. But in some contexts it can be desirable
     /// because it increases ownership hints in the code, and will guard against some changes
     /// in ownership.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// This example shows the basic adjustments necessary to satisfy the lint. Note how
     /// the matched expression is explicitly dereferenced with `*` and the `inner` variable
     /// is bound to a shared borrow via `ref inner`.
@@ -105,22 +104,25 @@ impl<'tcx> LateLintPass<'tcx> for PatternTypeMismatch {
     }
 
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
-        if let ExprKind::Match(expr, arms, source) = expr.kind {
-            match source {
-                MatchSource::Normal | MatchSource::IfLetDesugar { .. } | MatchSource::WhileLetDesugar => {
-                    if let Some(expr_ty) = cx.typeck_results().node_type_opt(expr.hir_id) {
-                        'pattern_checks: for arm in arms {
-                            let pat = &arm.pat;
-                            if in_external_macro(cx.sess(), pat.span) {
-                                continue 'pattern_checks;
-                            }
-                            if apply_lint(cx, pat, expr_ty, DerefPossible::Possible) {
-                                break 'pattern_checks;
-                            }
-                        }
+        if let ExprKind::Match(scrutinee, arms, MatchSource::Normal) = expr.kind {
+            if let Some(expr_ty) = cx.typeck_results().node_type_opt(scrutinee.hir_id) {
+                'pattern_checks: for arm in arms {
+                    let pat = &arm.pat;
+                    if in_external_macro(cx.sess(), pat.span) {
+                        continue 'pattern_checks;
                     }
-                },
-                _ => (),
+                    if apply_lint(cx, pat, expr_ty, DerefPossible::Possible) {
+                        break 'pattern_checks;
+                    }
+                }
+            }
+        }
+        if let ExprKind::Let(let_pat, let_expr, _) = expr.kind {
+            if let Some(ref expr_ty) = cx.typeck_results().node_type_opt(let_expr.hir_id) {
+                if in_external_macro(cx.sess(), let_pat.span) {
+                    return;
+                }
+                apply_lint(cx, let_pat, expr_ty, DerefPossible::Possible);
             }
         }
     }
@@ -258,7 +260,7 @@ fn get_variant<'a>(adt_def: &'a AdtDef, qpath: &QPath<'_>) -> Option<&'a Variant
 
 fn find_first_mismatch_in_tuple<'tcx, I>(
     cx: &LateContext<'tcx>,
-    pats: &[&Pat<'_>],
+    pats: &[Pat<'_>],
     ty_iter_src: I,
 ) -> Option<(Span, Mutability, Level)>
 where

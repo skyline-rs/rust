@@ -9,7 +9,7 @@ use std::fmt;
 use std::fs;
 use std::iter;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use build_helper::{self, output, t};
 
@@ -158,6 +158,49 @@ You can skip linkcheck with --exclude src/tools/linkchecker"
 
     fn make_run(run: RunConfig<'_>) {
         run.builder.ensure(Linkcheck { host: run.target });
+    }
+}
+
+fn check_if_tidy_is_installed() -> bool {
+    Command::new("tidy")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .status()
+        .map_or(false, |status| status.success())
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct HtmlCheck {
+    target: TargetSelection,
+}
+
+impl Step for HtmlCheck {
+    type Output = ();
+    const DEFAULT: bool = true;
+    const ONLY_HOSTS: bool = true;
+
+    fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
+        let run = run.path("src/tools/html-checker");
+        run.lazy_default_condition(Box::new(check_if_tidy_is_installed))
+    }
+
+    fn make_run(run: RunConfig<'_>) {
+        run.builder.ensure(HtmlCheck { target: run.target });
+    }
+
+    fn run(self, builder: &Builder<'_>) {
+        if !check_if_tidy_is_installed() {
+            eprintln!("not running HTML-check tool because `tidy` is missing");
+            eprintln!(
+                "Note that `tidy` is not the in-tree `src/tools/tidy` but needs to be installed"
+            );
+            panic!("Cannot run html-check tests");
+        }
+        // Ensure that a few different kinds of documentation are available.
+        builder.default_doc(&[]);
+        builder.ensure(crate::doc::Rustc { target: self.target, stage: builder.top_stage });
+
+        try_run(builder, builder.tool_cmd(Tool::HtmlChecker).arg(builder.doc_out(self.target)));
     }
 }
 
@@ -699,7 +742,7 @@ impl Step for RustdocTheme {
         let rustdoc = builder.out.join("bootstrap/debug/rustdoc");
         let mut cmd = builder.tool_cmd(Tool::RustdocTheme);
         cmd.arg(rustdoc.to_str().unwrap())
-            .arg(builder.src.join("src/librustdoc/html/static/themes").to_str().unwrap())
+            .arg(builder.src.join("src/librustdoc/html/static/css/themes").to_str().unwrap())
             .env("RUSTC_STAGE", self.compiler.stage.to_string())
             .env("RUSTC_SYSROOT", builder.sysroot(self.compiler))
             .env("RUSTDOC_LIBDIR", builder.sysroot_libdir(self.compiler, self.compiler.host))
@@ -864,27 +907,36 @@ impl Step for RustdocGUI {
         // We remove existing folder to be sure there won't be artifacts remaining.
         let _ = fs::remove_dir_all(&out_dir);
 
-        let mut nb_generated = 0;
+        let src_path = builder.build.src.join("src/test/rustdoc-gui/src");
         // We generate docs for the libraries present in the rustdoc-gui's src folder.
-        let libs_dir = builder.build.src.join("src/test/rustdoc-gui/src");
-        for entry in libs_dir.read_dir().expect("read_dir call failed") {
-            let entry = entry.expect("invalid entry");
-            let path = entry.path();
-            if path.extension().map(|e| e == "rs").unwrap_or(false) {
-                let mut command = builder.rustdoc_cmd(self.compiler);
-                command.arg(path).arg("-o").arg(&out_dir);
-                builder.run(&mut command);
-                nb_generated += 1;
+        for entry in src_path.read_dir().expect("read_dir call failed") {
+            if let Ok(entry) = entry {
+                let path = entry.path();
+
+                if !path.is_dir() {
+                    continue;
+                }
+
+                let mut cargo = Command::new(&builder.initial_cargo);
+                cargo
+                    .arg("doc")
+                    .arg("--target-dir")
+                    .arg(&out_dir)
+                    .env("RUSTDOC", builder.rustdoc(self.compiler))
+                    .env("RUSTC", builder.rustc(self.compiler))
+                    .current_dir(path);
+                builder.run(&mut cargo);
             }
         }
-        assert!(nb_generated > 0, "no documentation was generated...");
 
         // We now run GUI tests.
         let mut command = Command::new(&nodejs);
         command
             .arg(builder.build.src.join("src/tools/rustdoc-gui/tester.js"))
+            .arg("--jobs")
+            .arg(&builder.jobs().to_string())
             .arg("--doc-folder")
-            .arg(out_dir)
+            .arg(out_dir.join("doc"))
             .arg("--tests-folder")
             .arg(builder.build.src.join("src/test/rustdoc-gui"));
         for path in &builder.paths {
@@ -1263,6 +1315,10 @@ note: if you're sure you want to do this, please open an issue as to why. In the
 
         if builder.config.cmd.bless() {
             cmd.arg("--bless");
+        }
+
+        if builder.config.cmd.force_rerun() {
+            cmd.arg("--force-rerun");
         }
 
         let compare_mode =
@@ -1792,7 +1848,10 @@ impl Step for RustcGuide {
     }
 
     fn run(self, builder: &Builder<'_>) {
-        let src = builder.src.join("src/doc/rustc-dev-guide");
+        let relative_path = Path::new("src").join("doc").join("rustc-dev-guide");
+        builder.update_submodule(&relative_path);
+
+        let src = builder.src.join(relative_path);
         let mut rustbook_cmd = builder.tool_cmd(Tool::Rustbook);
         let toolstate = if try_run(builder, rustbook_cmd.arg("linkcheck").arg(&src)) {
             ToolState::TestPass

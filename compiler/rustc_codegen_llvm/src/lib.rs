@@ -8,7 +8,6 @@
 #![feature(bool_to_option)]
 #![feature(const_cstr_unchecked)]
 #![feature(crate_visibility_modifier)]
-#![cfg_attr(bootstrap, feature(extended_key_value_attributes))]
 #![feature(extern_types)]
 #![feature(in_band_lifetimes)]
 #![feature(iter_zip)]
@@ -293,14 +292,7 @@ impl CodegenBackend for LlvmCodegenBackend {
 
         // Run the linker on any artifacts that resulted from the LLVM run.
         // This should produce either a finished executable or library.
-        link_binary::<LlvmArchiveBuilder<'_>>(
-            sess,
-            &codegen_results,
-            outputs,
-            &codegen_results.crate_info.local_crate_name.as_str(),
-        );
-
-        Ok(())
+        link_binary::<LlvmArchiveBuilder<'_>>(sess, &codegen_results, outputs)
     }
 }
 
@@ -360,8 +352,8 @@ impl ModuleLlvm {
 impl Drop for ModuleLlvm {
     fn drop(&mut self) {
         unsafe {
-            llvm::LLVMContextDispose(&mut *(self.llcx as *mut _));
             llvm::LLVMRustDisposeTargetMachine(&mut *(self.tm as *mut _));
+            llvm::LLVMContextDispose(&mut *(self.llcx as *mut _));
         }
     }
 }

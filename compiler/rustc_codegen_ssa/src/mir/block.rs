@@ -132,14 +132,21 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
     ) {
         // If there is a cleanup block and the function we're calling can unwind, then
         // do an invoke, otherwise do a call.
+        let fn_ty = bx.fn_decl_backend_type(&fn_abi);
         if let Some(cleanup) = cleanup.filter(|_| fn_abi.can_unwind) {
             let ret_llbb = if let Some((_, target)) = destination {
                 fx.llbb(target)
             } else {
                 fx.unreachable_block()
             };
-            let invokeret =
-                bx.invoke(fn_ptr, &llargs, ret_llbb, self.llblock(fx, cleanup), self.funclet(fx));
+            let invokeret = bx.invoke(
+                fn_ty,
+                fn_ptr,
+                &llargs,
+                ret_llbb,
+                self.llblock(fx, cleanup),
+                self.funclet(fx),
+            );
             bx.apply_attrs_callsite(&fn_abi, invokeret);
 
             if let Some((ret_dest, target)) = destination {
@@ -148,7 +155,7 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
                 fx.store_return(&mut ret_bx, ret_dest, &fn_abi.ret, invokeret);
             }
         } else {
-            let llret = bx.call(fn_ptr, &llargs, self.funclet(fx));
+            let llret = bx.call(fn_ty, fn_ptr, &llargs, self.funclet(fx));
             bx.apply_attrs_callsite(&fn_abi, llret);
             if fx.mir[self.bb].is_cleanup {
                 // Cleanup is always the cold path. Don't inline
@@ -260,7 +267,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             PassMode::Direct(_) | PassMode::Pair(..) => {
                 let op = self.codegen_consume(&mut bx, mir::Place::return_place().as_ref());
                 if let Ref(llval, _, align) = op.val {
-                    bx.load(llval, align)
+                    bx.load(bx.backend_type(op.layout), llval, align)
                 } else {
                     op.immediate_or_packed_pair(&mut bx)
                 }
@@ -287,8 +294,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         llval
                     }
                 };
-                let addr = bx.pointercast(llslot, bx.type_ptr_to(bx.cast_backend_type(&cast_ty)));
-                bx.load(addr, self.fn_abi.ret.layout.align.abi)
+                let ty = bx.cast_backend_type(&cast_ty);
+                let addr = bx.pointercast(llslot, bx.type_ptr_to(ty));
+                bx.load(ty, addr, self.fn_abi.ret.layout.align.abi)
             }
         };
         bx.ret(llval);
@@ -1086,15 +1094,16 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         if by_ref && !arg.is_indirect() {
             // Have to load the argument, maybe while casting it.
             if let PassMode::Cast(ty) = arg.mode {
-                let addr = bx.pointercast(llval, bx.type_ptr_to(bx.cast_backend_type(&ty)));
-                llval = bx.load(addr, align.min(arg.layout.align.abi));
+                let llty = bx.cast_backend_type(&ty);
+                let addr = bx.pointercast(llval, bx.type_ptr_to(llty));
+                llval = bx.load(llty, addr, align.min(arg.layout.align.abi));
             } else {
                 // We can't use `PlaceRef::load` here because the argument
                 // may have a type we don't treat as immediate, but the ABI
                 // used for this call is passing it by-value. In that case,
                 // the load would just produce `OperandValue::Ref` instead
                 // of the `OperandValue::Immediate` we need for the call.
-                llval = bx.load(llval, align);
+                llval = bx.load(bx.backend_type(arg.layout), llval, align);
                 if let abi::Abi::Scalar(ref scalar) = arg.layout.abi {
                     if scalar.is_bool() {
                         bx.range_metadata(llval, 0..2);
@@ -1389,7 +1398,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 LocalRef::UnsizedPlace(_) => bug!("transmute must not involve unsized locals"),
                 LocalRef::Operand(None) => {
                     let dst_layout = bx.layout_of(self.monomorphized_place_ty(dst.as_ref()));
-                    assert!(!dst_layout.ty.has_erasable_regions());
+                    assert!(!dst_layout.ty.has_erasable_regions(self.cx.tcx()));
                     let place = PlaceRef::alloca(bx, dst_layout);
                     place.storage_live(bx);
                     self.codegen_transmute_into(bx, src, place);

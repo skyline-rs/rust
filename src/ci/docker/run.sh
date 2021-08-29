@@ -219,6 +219,16 @@ else
   command="/checkout/src/ci/run.sh"
 fi
 
+if [ "$CI" != "" ]; then
+  # Get some needed information for $BASE_COMMIT
+  #
+  # This command gets the last merge commit which we'll use as base to list
+  # deleted files since then.
+  BASE_COMMIT="$(git log --author=bors@rust-lang.org -n 2 --pretty=format:%H | tail -n 1)"
+else
+  BASE_COMMIT=""
+fi
+
 docker \
   run \
   --workdir /checkout/obj \
@@ -237,6 +247,7 @@ docker \
   --env TOOLSTATE_PUBLISH \
   --env RUST_CI_OVERRIDE_RELEASE_CHANNEL \
   --env CI_JOB_NAME="${CI_JOB_NAME-$IMAGE}" \
+  --env BASE_COMMIT="$BASE_COMMIT" \
   --init \
   --rm \
   rust-ci \

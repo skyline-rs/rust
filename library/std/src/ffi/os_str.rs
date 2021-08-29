@@ -271,7 +271,9 @@ impl OsString {
     ///
     /// Note that the allocator may give the collection more space than it
     /// requests. Therefore, capacity can not be relied upon to be precisely
-    /// minimal. Prefer reserve if future insertions are expected.
+    /// minimal. Prefer [`reserve`] if future insertions are expected.
+    ///
+    /// [`reserve`]: OsString::reserve
     ///
     /// # Examples
     ///
@@ -319,7 +321,6 @@ impl OsString {
     /// # Examples
     ///
     /// ```
-    /// #![feature(shrink_to)]
     /// use std::ffi::OsString;
     ///
     /// let mut s = OsString::from("foo");
@@ -333,7 +334,7 @@ impl OsString {
     /// assert!(s.capacity() >= 3);
     /// ```
     #[inline]
-    #[unstable(feature = "shrink_to", reason = "new API", issue = "56431")]
+    #[stable(feature = "shrink_to", since = "1.56.0")]
     pub fn shrink_to(&mut self, min_capacity: usize) {
         self.inner.shrink_to(min_capacity)
     }
@@ -358,7 +359,7 @@ impl OsString {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl From<String> for OsString {
-    /// Converts a [`String`] into a [`OsString`].
+    /// Converts a [`String`] into an [`OsString`].
     ///
     /// This conversion does not allocate or copy memory.
     #[inline]
@@ -694,7 +695,6 @@ impl OsStr {
     /// let os_str = OsStr::new("foo");
     /// assert_eq!(os_str.len(), 3);
     /// ```
-    #[doc(alias = "length")]
     #[stable(feature = "osstring_simple_functions", since = "1.9.0")]
     #[inline]
     pub fn len(&self) -> usize {
@@ -880,7 +880,7 @@ impl From<Box<OsStr>> for OsString {
 
 #[stable(feature = "box_from_os_string", since = "1.20.0")]
 impl From<OsString> for Box<OsStr> {
-    /// Converts a [`OsString`] into a [`Box`]`<OsStr>` without copying or allocating.
+    /// Converts an [`OsString`] into a [`Box`]`<OsStr>` without copying or allocating.
     #[inline]
     fn from(s: OsString) -> Box<OsStr> {
         s.into_boxed_os_str()
@@ -897,7 +897,7 @@ impl Clone for Box<OsStr> {
 
 #[stable(feature = "shared_from_slice2", since = "1.24.0")]
 impl From<OsString> for Arc<OsStr> {
-    /// Converts a [`OsString`] into a [`Arc`]`<OsStr>` without copying or allocating.
+    /// Converts an [`OsString`] into an [`Arc`]`<OsStr>` without copying or allocating.
     #[inline]
     fn from(s: OsString) -> Arc<OsStr> {
         let arc = s.inner.into_arc();
@@ -916,7 +916,7 @@ impl From<&OsStr> for Arc<OsStr> {
 
 #[stable(feature = "shared_from_slice2", since = "1.24.0")]
 impl From<OsString> for Rc<OsStr> {
-    /// Converts a [`OsString`] into a [`Rc`]`<OsStr>` without copying or allocating.
+    /// Converts an [`OsString`] into an [`Rc`]`<OsStr>` without copying or allocating.
     #[inline]
     fn from(s: OsString) -> Rc<OsStr> {
         let rc = s.inner.into_rc();

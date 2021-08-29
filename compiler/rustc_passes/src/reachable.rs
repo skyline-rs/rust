@@ -211,19 +211,22 @@ impl<'tcx> ReachableContext<'tcx> {
         if !self.any_library {
             // If we are building an executable, only explicitly extern
             // types need to be exported.
-            if let Node::Item(item) = *node {
-                let reachable = if let hir::ItemKind::Fn(ref sig, ..) = item.kind {
+            let reachable =
+                if let Node::Item(hir::Item { kind: hir::ItemKind::Fn(sig, ..), .. })
+                | Node::ImplItem(hir::ImplItem {
+                    kind: hir::ImplItemKind::Fn(sig, ..), ..
+                }) = *node
+                {
                     sig.header.abi != Abi::Rust
                 } else {
                     false
                 };
-                let codegen_attrs = self.tcx.codegen_fn_attrs(item.def_id);
-                let is_extern = codegen_attrs.contains_extern_indicator();
-                let std_internal =
-                    codegen_attrs.flags.contains(CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL);
-                if reachable || is_extern || std_internal {
-                    self.reachable_symbols.insert(search_item);
-                }
+            let codegen_attrs = self.tcx.codegen_fn_attrs(search_item);
+            let is_extern = codegen_attrs.contains_extern_indicator();
+            let std_internal =
+                codegen_attrs.flags.contains(CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL);
+            if reachable || is_extern || std_internal {
+                self.reachable_symbols.insert(search_item);
             }
         } else {
             // If we are building a library, then reachable symbols will
@@ -260,6 +263,7 @@ impl<'tcx> ReachableContext<'tcx> {
                     | hir::ItemKind::Use(..)
                     | hir::ItemKind::OpaqueTy(..)
                     | hir::ItemKind::TyAlias(..)
+                    | hir::ItemKind::Macro(..)
                     | hir::ItemKind::Mod(..)
                     | hir::ItemKind::ForeignMod { .. }
                     | hir::ItemKind::Impl { .. }
@@ -306,8 +310,7 @@ impl<'tcx> ReachableContext<'tcx> {
             | Node::Ctor(..)
             | Node::Field(_)
             | Node::Ty(_)
-            | Node::Crate(_)
-            | Node::MacroDef(_) => {}
+            | Node::Crate(_) => {}
             _ => {
                 bug!(
                     "found unexpected node kind in worklist: {} ({:?})",
@@ -335,23 +338,29 @@ struct CollectPrivateImplItemsVisitor<'a, 'tcx> {
     worklist: &'a mut Vec<LocalDefId>,
 }
 
-impl<'a, 'tcx> ItemLikeVisitor<'tcx> for CollectPrivateImplItemsVisitor<'a, 'tcx> {
-    fn visit_item(&mut self, item: &hir::Item<'_>) {
+impl CollectPrivateImplItemsVisitor<'_, '_> {
+    fn push_to_worklist_if_has_custom_linkage(&mut self, def_id: LocalDefId) {
         // Anything which has custom linkage gets thrown on the worklist no
         // matter where it is in the crate, along with "special std symbols"
         // which are currently akin to allocator symbols.
-        let codegen_attrs = self.tcx.codegen_fn_attrs(item.def_id);
+        let codegen_attrs = self.tcx.codegen_fn_attrs(def_id);
         if codegen_attrs.contains_extern_indicator()
             || codegen_attrs.flags.contains(CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL)
         {
-            self.worklist.push(item.def_id);
+            self.worklist.push(def_id);
         }
+    }
+}
+
+impl<'a, 'tcx> ItemLikeVisitor<'tcx> for CollectPrivateImplItemsVisitor<'a, 'tcx> {
+    fn visit_item(&mut self, item: &hir::Item<'_>) {
+        self.push_to_worklist_if_has_custom_linkage(item.def_id);
 
         // We need only trait impls here, not inherent impls, and only non-exported ones
         if let hir::ItemKind::Impl(hir::Impl { of_trait: Some(ref trait_ref), ref items, .. }) =
             item.kind
         {
-            if !self.access_levels.is_reachable(item.hir_id()) {
+            if !self.access_levels.is_reachable(item.def_id) {
                 // FIXME(#53488) remove `let`
                 let tcx = self.tcx;
                 self.worklist.extend(items.iter().map(|ii_ref| ii_ref.id.def_id));
@@ -375,8 +384,8 @@ impl<'a, 'tcx> ItemLikeVisitor<'tcx> for CollectPrivateImplItemsVisitor<'a, 'tcx
 
     fn visit_trait_item(&mut self, _trait_item: &hir::TraitItem<'_>) {}
 
-    fn visit_impl_item(&mut self, _impl_item: &hir::ImplItem<'_>) {
-        // processed in visit_item above
+    fn visit_impl_item(&mut self, impl_item: &hir::ImplItem<'_>) {
+        self.push_to_worklist_if_has_custom_linkage(impl_item.def_id);
     }
 
     fn visit_foreign_item(&mut self, _foreign_item: &hir::ForeignItem<'_>) {
@@ -404,9 +413,7 @@ fn reachable_set<'tcx>(tcx: TyCtxt<'tcx>, (): ()) -> FxHashSet<LocalDefId> {
     //         If other crates link to us, they're going to expect to be able to
     //         use the lang items, so we need to be sure to mark them as
     //         exported.
-    reachable_context
-        .worklist
-        .extend(access_levels.map.iter().map(|(id, _)| tcx.hir().local_def_id(*id)));
+    reachable_context.worklist.extend(access_levels.map.keys());
     for item in tcx.lang_items().items().iter() {
         if let Some(def_id) = *item {
             if let Some(def_id) = def_id.as_local() {

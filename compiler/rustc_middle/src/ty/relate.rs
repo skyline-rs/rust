@@ -200,6 +200,33 @@ impl<'tcx> Relate<'tcx> for ty::FnSig<'tcx> {
     }
 }
 
+impl<'tcx> Relate<'tcx> for ty::BoundConstness {
+    fn relate<R: TypeRelation<'tcx>>(
+        relation: &mut R,
+        a: ty::BoundConstness,
+        b: ty::BoundConstness,
+    ) -> RelateResult<'tcx, ty::BoundConstness> {
+        if a != b {
+            Err(TypeError::ConstnessMismatch(expected_found(relation, a, b)))
+        } else {
+            Ok(a)
+        }
+    }
+}
+
+impl<'tcx, T: Relate<'tcx>> Relate<'tcx> for ty::ConstnessAnd<T> {
+    fn relate<R: TypeRelation<'tcx>>(
+        relation: &mut R,
+        a: ty::ConstnessAnd<T>,
+        b: ty::ConstnessAnd<T>,
+    ) -> RelateResult<'tcx, ty::ConstnessAnd<T>> {
+        Ok(ty::ConstnessAnd {
+            constness: relation.relate(a.constness, b.constness)?,
+            value: relation.relate(a.value, b.value)?,
+        })
+    }
+}
+
 impl<'tcx> Relate<'tcx> for ast::Unsafety {
     fn relate<R: TypeRelation<'tcx>>(
         relation: &mut R,
@@ -552,7 +579,7 @@ pub fn super_relate_consts<R: TypeRelation<'tcx>>(
         (ty::ConstKind::Unevaluated(au), ty::ConstKind::Unevaluated(bu))
             if tcx.features().const_evaluatable_checked =>
         {
-            tcx.try_unify_abstract_consts(((au.def, au.substs), (bu.def, bu.substs)))
+            tcx.try_unify_abstract_consts((au.shrink(), bu.shrink()))
         }
 
         // While this is slightly incorrect, it shouldn't matter for `min_const_generics`
@@ -564,13 +591,13 @@ pub fn super_relate_consts<R: TypeRelation<'tcx>>(
             let substs = relation.relate_with_variance(
                 ty::Variance::Invariant,
                 ty::VarianceDiagInfo::default(),
-                au.substs,
-                bu.substs,
+                au.substs(tcx),
+                bu.substs(tcx),
             )?;
             return Ok(tcx.mk_const(ty::Const {
                 val: ty::ConstKind::Unevaluated(ty::Unevaluated {
                     def: au.def,
-                    substs,
+                    substs_: Some(substs),
                     promoted: au.promoted,
                 }),
                 ty: a.ty,
@@ -595,9 +622,12 @@ fn check_const_value_eq<R: TypeRelation<'tcx>>(
         (ConstValue::Scalar(Scalar::Int(a_val)), ConstValue::Scalar(Scalar::Int(b_val))) => {
             a_val == b_val
         }
-        (ConstValue::Scalar(Scalar::Ptr(a_val)), ConstValue::Scalar(Scalar::Ptr(b_val))) => {
+        (
+            ConstValue::Scalar(Scalar::Ptr(a_val, _a_size)),
+            ConstValue::Scalar(Scalar::Ptr(b_val, _b_size)),
+        ) => {
             a_val == b_val
-                || match (tcx.global_alloc(a_val.alloc_id), tcx.global_alloc(b_val.alloc_id)) {
+                || match (tcx.global_alloc(a_val.provenance), tcx.global_alloc(b_val.provenance)) {
                     (GlobalAlloc::Function(a_instance), GlobalAlloc::Function(b_instance)) => {
                         a_instance == b_instance
                     }
@@ -764,7 +794,10 @@ impl<'tcx> Relate<'tcx> for ty::TraitPredicate<'tcx> {
         a: ty::TraitPredicate<'tcx>,
         b: ty::TraitPredicate<'tcx>,
     ) -> RelateResult<'tcx, ty::TraitPredicate<'tcx>> {
-        Ok(ty::TraitPredicate { trait_ref: relation.relate(a.trait_ref, b.trait_ref)? })
+        Ok(ty::TraitPredicate {
+            trait_ref: relation.relate(a.trait_ref, b.trait_ref)?,
+            constness: relation.relate(a.constness, b.constness)?,
+        })
     }
 }
 

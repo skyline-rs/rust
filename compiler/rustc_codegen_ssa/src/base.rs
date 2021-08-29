@@ -20,11 +20,9 @@ use rustc_hir::lang_items::LangItem;
 use rustc_index::vec::Idx;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs;
 use rustc_middle::middle::cstore::EncodedMetadata;
-use rustc_middle::middle::cstore::{self, LinkagePreference};
 use rustc_middle::middle::lang_items;
 use rustc_middle::mir::mono::{CodegenUnit, CodegenUnitNameBuilder, MonoItem};
 use rustc_middle::ty::layout::{HasTyCtxt, TyAndLayout};
-use rustc_middle::ty::layout::{FAT_PTR_ADDR, FAT_PTR_EXTRA};
 use rustc_middle::ty::query::Providers;
 use rustc_middle::ty::{self, Instance, Ty, TyCtxt};
 use rustc_session::cgu_reuse_tracker::CguReuse;
@@ -33,6 +31,7 @@ use rustc_session::Session;
 use rustc_span::symbol::sym;
 use rustc_target::abi::{Align, LayoutOf, VariantIdx};
 
+use std::convert::TryFrom;
 use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant};
 
@@ -129,55 +128,84 @@ pub fn compare_simd_types<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
 ///
 /// The `old_info` argument is a bit odd. It is intended for use in an upcast,
 /// where the new vtable for an object will be derived from the old one.
-pub fn unsized_info<'tcx, Cx: CodegenMethods<'tcx>>(
-    cx: &Cx,
+pub fn unsized_info<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
+    bx: &mut Bx,
     source: Ty<'tcx>,
     target: Ty<'tcx>,
-    old_info: Option<Cx::Value>,
-) -> Cx::Value {
+    old_info: Option<Bx::Value>,
+) -> Bx::Value {
+    let cx = bx.cx();
     let (source, target) =
-        cx.tcx().struct_lockstep_tails_erasing_lifetimes(source, target, cx.param_env());
+        cx.tcx().struct_lockstep_tails_erasing_lifetimes(source, target, bx.param_env());
     match (source.kind(), target.kind()) {
         (&ty::Array(_, len), &ty::Slice(_)) => {
             cx.const_usize(len.eval_usize(cx.tcx(), ty::ParamEnv::reveal_all()))
         }
-        (&ty::Dynamic(..), &ty::Dynamic(..)) => {
-            // For now, upcasts are limited to changes in marker
-            // traits, and hence never actually require an actual
-            // change to the vtable.
-            old_info.expect("unsized_info: missing old info for trait upcast")
+        (&ty::Dynamic(ref data_a, ..), &ty::Dynamic(ref data_b, ..)) => {
+            let old_info =
+                old_info.expect("unsized_info: missing old info for trait upcasting coercion");
+            if data_a.principal_def_id() == data_b.principal_def_id() {
+                return old_info;
+            }
+
+            // trait upcasting coercion
+
+            let vptr_entry_idx =
+                cx.tcx().vtable_trait_upcasting_coercion_new_vptr_slot((source, target));
+
+            if let Some(entry_idx) = vptr_entry_idx {
+                let ptr_ty = cx.type_i8p();
+                let ptr_align = cx.tcx().data_layout.pointer_align.abi;
+                let llvtable = bx.pointercast(old_info, bx.type_ptr_to(ptr_ty));
+                let gep = bx.inbounds_gep(
+                    ptr_ty,
+                    llvtable,
+                    &[bx.const_usize(u64::try_from(entry_idx).unwrap())],
+                );
+                let new_vptr = bx.load(ptr_ty, gep, ptr_align);
+                bx.nonnull_metadata(new_vptr);
+                // Vtable loads are invariant.
+                bx.set_invariant_load(new_vptr);
+                new_vptr
+            } else {
+                old_info
+            }
         }
         (_, &ty::Dynamic(ref data, ..)) => {
-            let vtable_ptr = cx.layout_of(cx.tcx().mk_mut_ptr(target)).field(cx, FAT_PTR_EXTRA);
-            cx.const_ptrcast(
-                meth::get_vtable(cx, source, data.principal()),
-                cx.backend_type(vtable_ptr),
-            )
+            let vtable_ptr_ty = cx.scalar_pair_element_backend_type(
+                cx.layout_of(cx.tcx().mk_mut_ptr(target)),
+                1,
+                true,
+            );
+            cx.const_ptrcast(meth::get_vtable(cx, source, data.principal()), vtable_ptr_ty)
         }
         _ => bug!("unsized_info: invalid unsizing {:?} -> {:?}", source, target),
     }
 }
 
-/// Coerces `src` to `dst_ty`. `src_ty` must be a thin pointer.
-pub fn unsize_thin_ptr<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
+/// Coerces `src` to `dst_ty`. `src_ty` must be a pointer.
+pub fn unsize_ptr<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     bx: &mut Bx,
     src: Bx::Value,
     src_ty: Ty<'tcx>,
     dst_ty: Ty<'tcx>,
+    old_info: Option<Bx::Value>,
 ) -> (Bx::Value, Bx::Value) {
-    debug!("unsize_thin_ptr: {:?} => {:?}", src_ty, dst_ty);
+    debug!("unsize_ptr: {:?} => {:?}", src_ty, dst_ty);
     match (src_ty.kind(), dst_ty.kind()) {
         (&ty::Ref(_, a, _), &ty::Ref(_, b, _) | &ty::RawPtr(ty::TypeAndMut { ty: b, .. }))
         | (&ty::RawPtr(ty::TypeAndMut { ty: a, .. }), &ty::RawPtr(ty::TypeAndMut { ty: b, .. })) => {
-            assert!(bx.cx().type_is_sized(a));
+            assert_eq!(bx.cx().type_is_sized(a), old_info.is_none());
             let ptr_ty = bx.cx().type_ptr_to(bx.cx().backend_type(bx.cx().layout_of(b)));
-            (bx.pointercast(src, ptr_ty), unsized_info(bx.cx(), a, b, None))
+            (bx.pointercast(src, ptr_ty), unsized_info(bx, a, b, old_info))
         }
         (&ty::Adt(def_a, _), &ty::Adt(def_b, _)) => {
             assert_eq!(def_a, def_b);
-
             let src_layout = bx.cx().layout_of(src_ty);
             let dst_layout = bx.cx().layout_of(dst_ty);
+            if src_ty == dst_ty {
+                return (src, old_info.unwrap());
+            }
             let mut result = None;
             for i in 0..src_layout.fields.count() {
                 let src_f = src_layout.field(bx.cx(), i);
@@ -191,18 +219,15 @@ pub fn unsize_thin_ptr<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
                 let dst_f = dst_layout.field(bx.cx(), i);
                 assert_ne!(src_f.ty, dst_f.ty);
                 assert_eq!(result, None);
-                result = Some(unsize_thin_ptr(bx, src, src_f.ty, dst_f.ty));
+                result = Some(unsize_ptr(bx, src, src_f.ty, dst_f.ty, old_info));
             }
             let (lldata, llextra) = result.unwrap();
+            let lldata_ty = bx.cx().scalar_pair_element_backend_type(dst_layout, 0, true);
+            let llextra_ty = bx.cx().scalar_pair_element_backend_type(dst_layout, 1, true);
             // HACK(eddyb) have to bitcast pointers until LLVM removes pointee types.
-            // FIXME(eddyb) move these out of this `match` arm, so they're always
-            // applied, uniformly, no matter the source/destination types.
-            (
-                bx.bitcast(lldata, bx.cx().scalar_pair_element_backend_type(dst_layout, 0, true)),
-                bx.bitcast(llextra, bx.cx().scalar_pair_element_backend_type(dst_layout, 1, true)),
-            )
+            (bx.bitcast(lldata, lldata_ty), bx.bitcast(llextra, llextra_ty))
         }
-        _ => bug!("unsize_thin_ptr: called on bad types"),
+        _ => bug!("unsize_ptr: called on bad types"),
     }
 }
 
@@ -218,17 +243,8 @@ pub fn coerce_unsized_into<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     match (src_ty.kind(), dst_ty.kind()) {
         (&ty::Ref(..), &ty::Ref(..) | &ty::RawPtr(..)) | (&ty::RawPtr(..), &ty::RawPtr(..)) => {
             let (base, info) = match bx.load_operand(src).val {
-                OperandValue::Pair(base, info) => {
-                    // fat-ptr to fat-ptr unsize preserves the vtable
-                    // i.e., &'a fmt::Debug+Send => &'a fmt::Debug
-                    // So we need to pointercast the base to ensure
-                    // the types match up.
-                    // FIXME(eddyb) use `scalar_pair_element_backend_type` here,
-                    // like `unsize_thin_ptr` does.
-                    let thin_ptr = dst.layout.field(bx.cx(), FAT_PTR_ADDR);
-                    (bx.pointercast(base, bx.cx().backend_type(thin_ptr)), info)
-                }
-                OperandValue::Immediate(base) => unsize_thin_ptr(bx, base, src_ty, dst_ty),
+                OperandValue::Pair(base, info) => unsize_ptr(bx, base, src_ty, dst_ty, Some(info)),
+                OperandValue::Immediate(base) => unsize_ptr(bx, base, src_ty, dst_ty, None),
                 OperandValue::Ref(..) => bug!(),
             };
             OperandValue::Pair(base, info).store(bx, dst);
@@ -406,7 +422,7 @@ pub fn maybe_create_entry_wrapper<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         };
 
         // `main` should respect same config for frame pointer elimination as rest of code
-        cx.set_frame_pointer_elimination(llfn);
+        cx.set_frame_pointer_type(llfn);
         cx.apply_target_cpu_attr(llfn);
 
         let llbb = Bx::append_block(&cx, llfn, "top");
@@ -414,9 +430,11 @@ pub fn maybe_create_entry_wrapper<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
 
         bx.insert_reference_to_gdb_debug_scripts_section_global();
 
+        let isize_ty = cx.type_isize();
+        let i8pp_ty = cx.type_ptr_to(cx.type_i8p());
         let (arg_argc, arg_argv) = get_argc_argv(cx, &mut bx);
 
-        let (start_fn, args) = if use_start_lang_item {
+        let (start_fn, start_ty, args) = if use_start_lang_item {
             let start_def_id = cx.tcx().require_lang_item(LangItem::Start, None);
             let start_fn = cx.get_fn_addr(
                 ty::Instance::resolve(
@@ -428,16 +446,15 @@ pub fn maybe_create_entry_wrapper<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
                 .unwrap()
                 .unwrap(),
             );
-            (
-                start_fn,
-                vec![bx.pointercast(rust_main, cx.type_ptr_to(cx.type_i8p())), arg_argc, arg_argv],
-            )
+            let start_ty = cx.type_func(&[cx.val_ty(rust_main), isize_ty, i8pp_ty], isize_ty);
+            (start_fn, start_ty, vec![rust_main, arg_argc, arg_argv])
         } else {
             debug!("using user-defined start fn");
-            (rust_main, vec![arg_argc, arg_argv])
+            let start_ty = cx.type_func(&[isize_ty, i8pp_ty], isize_ty);
+            (rust_main, start_ty, vec![arg_argc, arg_argv])
         };
 
-        let result = bx.call(start_fn, &args, None);
+        let result = bx.call(start_ty, start_fn, &args, None);
         let cast = bx.intcast(result, cx.type_int(), true);
         bx.ret(cast);
 
@@ -518,7 +535,7 @@ pub fn codegen_crate<B: ExtraBackendMethods>(
     });
     let allocator_module = if any_dynamic_crate {
         None
-    } else if let Some(kind) = tcx.allocator_kind() {
+    } else if let Some(kind) = tcx.allocator_kind(()) {
         let llmod_id =
             cgu_name_builder.build_cgu_name(LOCAL_CRATE, &["crate"], Some("allocator")).to_string();
         let mut modules = backend.new_metadata(tcx, &llmod_id);
@@ -755,7 +772,13 @@ impl<B: ExtraBackendMethods> Drop for AbortCodegenOnDrop<B> {
 }
 
 impl CrateInfo {
-    pub fn new(tcx: TyCtxt<'_>) -> CrateInfo {
+    pub fn new(tcx: TyCtxt<'_>, target_cpu: String) -> CrateInfo {
+        let exported_symbols = tcx
+            .sess
+            .crate_types()
+            .iter()
+            .map(|&c| (c, crate::back::linker::exported_symbols(tcx, c)))
+            .collect();
         let local_crate_name = tcx.crate_name(LOCAL_CRATE);
         let crate_attrs = tcx.hir().attrs(rustc_hir::CRATE_HIR_ID);
         let subsystem = tcx.sess.first_attr_value_str_by_name(crate_attrs, sym::windows_subsystem);
@@ -770,17 +793,33 @@ impl CrateInfo {
             subsystem.to_string()
         });
 
+        // This list is used when generating the command line to pass through to
+        // system linker. The linker expects undefined symbols on the left of the
+        // command line to be defined in libraries on the right, not the other way
+        // around. For more info, see some comments in the add_used_library function
+        // below.
+        //
+        // In order to get this left-to-right dependency ordering, we use the reverse
+        // postorder of all crates putting the leaves at the right-most positions.
+        let used_crates = tcx
+            .postorder_cnums(())
+            .iter()
+            .rev()
+            .copied()
+            .filter(|&cnum| !tcx.dep_kind(cnum).macros_only())
+            .collect();
+
         let mut info = CrateInfo {
+            target_cpu,
+            exported_symbols,
             local_crate_name,
-            panic_runtime: None,
             compiler_builtins: None,
             profiler_runtime: None,
             is_no_builtins: Default::default(),
             native_libraries: Default::default(),
             used_libraries: tcx.native_libraries(LOCAL_CRATE).iter().map(Into::into).collect(),
             crate_name: Default::default(),
-            used_crates_dynamic: cstore::used_crates(tcx, LinkagePreference::RequireDynamic),
-            used_crates_static: cstore::used_crates(tcx, LinkagePreference::RequireStatic),
+            used_crates,
             used_crate_source: Default::default(),
             lang_item_to_crate: Default::default(),
             missing_lang_items: Default::default(),
@@ -789,7 +828,7 @@ impl CrateInfo {
         };
         let lang_items = tcx.lang_items();
 
-        let crates = tcx.crates();
+        let crates = tcx.crates(());
 
         let n_crates = crates.len();
         info.native_libraries.reserve(n_crates);
@@ -802,9 +841,6 @@ impl CrateInfo {
                 .insert(cnum, tcx.native_libraries(cnum).iter().map(Into::into).collect());
             info.crate_name.insert(cnum, tcx.crate_name(cnum).to_string());
             info.used_crate_source.insert(cnum, tcx.used_crate_source(cnum));
-            if tcx.is_panic_runtime(cnum) {
-                info.panic_runtime = Some(cnum);
-            }
             if tcx.is_compiler_builtins(cnum) {
                 info.compiler_builtins = Some(cnum);
             }

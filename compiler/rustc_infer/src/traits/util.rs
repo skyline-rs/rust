@@ -14,17 +14,17 @@ pub fn anonymize_predicate<'tcx>(
     tcx.reuse_or_mk_predicate(pred, new)
 }
 
-struct PredicateSet<'tcx> {
+pub struct PredicateSet<'tcx> {
     tcx: TyCtxt<'tcx>,
     set: FxHashSet<ty::Predicate<'tcx>>,
 }
 
 impl PredicateSet<'tcx> {
-    fn new(tcx: TyCtxt<'tcx>) -> Self {
+    pub fn new(tcx: TyCtxt<'tcx>) -> Self {
         Self { tcx, set: Default::default() }
     }
 
-    fn insert(&mut self, pred: ty::Predicate<'tcx>) -> bool {
+    pub fn insert(&mut self, pred: ty::Predicate<'tcx>) -> bool {
         // We have to be careful here because we want
         //
         //    for<'a> Foo<&'a i32>
@@ -124,7 +124,7 @@ impl Elaborator<'tcx> {
 
         let bound_predicate = obligation.predicate.kind();
         match bound_predicate.skip_binder() {
-            ty::PredicateKind::Trait(data, _) => {
+            ty::PredicateKind::Trait(data) => {
                 // Get predicates declared on the trait.
                 let predicates = tcx.super_predicates_of(data.def_id());
 
@@ -156,6 +156,10 @@ impl Elaborator<'tcx> {
             }
             ty::PredicateKind::Subtype(..) => {
                 // Currently, we do not "elaborate" predicates like `X <: Y`,
+                // though conceivably we might.
+            }
+            ty::PredicateKind::Coerce(..) => {
+                // Currently, we do not "elaborate" predicates like `X -> Y`,
                 // though conceivably we might.
             }
             ty::PredicateKind::Projection(..) => {

@@ -8,6 +8,7 @@
 //! out to `rust-installer` still. This may one day be replaced with bits and
 //! pieces of `rustup.rs`!
 
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -45,6 +46,13 @@ fn missing_tool(tool_name: &str, skip: bool) {
     }
 }
 
+fn should_build_extended_tool(builder: &Builder<'_>, tool: &str) -> bool {
+    if !builder.config.extended {
+        return false;
+    }
+    builder.config.tools.as_ref().map_or(true, |tools| tools.contains(tool))
+}
+
 #[derive(Debug, PartialOrd, Ord, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct Docs {
     pub host: TargetSelection,
@@ -55,7 +63,8 @@ impl Step for Docs {
     const DEFAULT: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-        run.path("src/doc")
+        let default = run.builder.config.docs;
+        run.path("src/doc").default_condition(default)
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -65,9 +74,6 @@ impl Step for Docs {
     /// Builds the `rust-docs` installer component.
     fn run(self, builder: &Builder<'_>) -> Option<GeneratedTarball> {
         let host = self.host;
-        if !builder.config.docs {
-            return None;
-        }
         builder.default_doc(&[]);
 
         let dest = "share/doc/rust/html";
@@ -400,12 +406,14 @@ impl Step for Rustc {
 
             // Copy over lld if it's there
             if builder.config.lld_enabled {
-                let exe = exe("rust-lld", compiler.host);
-                builder.copy(&src_dir.join(&exe), &dst_dir.join(&exe));
+                let rust_lld = exe("rust-lld", compiler.host);
+                builder.copy(&src_dir.join(&rust_lld), &dst_dir.join(&rust_lld));
                 // for `-Z gcc-ld=lld`
                 let gcc_lld_dir = dst_dir.join("gcc-ld");
                 t!(fs::create_dir(&gcc_lld_dir));
-                builder.copy(&src_dir.join(&exe), &gcc_lld_dir.join(&exe));
+                builder.copy(&src_dir.join(&rust_lld), &gcc_lld_dir.join(exe("ld", compiler.host)));
+                builder
+                    .copy(&src_dir.join(&rust_lld), &gcc_lld_dir.join(exe("ld64", compiler.host)));
             }
 
             // Copy over llvm-dwp if it's there
@@ -676,8 +684,8 @@ impl Step for Analysis {
     const DEFAULT: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-        let builder = run.builder;
-        run.path("analysis").default_condition(builder.config.extended)
+        let default = should_build_extended_tool(&run.builder, "analysis");
+        run.path("analysis").default_condition(default)
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -698,7 +706,6 @@ impl Step for Analysis {
     fn run(self, builder: &Builder<'_>) -> Option<GeneratedTarball> {
         let compiler = self.compiler;
         let target = self.target;
-        assert!(builder.config.extended);
         if compiler.host != builder.config.build {
             return None;
         }
@@ -953,11 +960,13 @@ pub struct Cargo {
 }
 
 impl Step for Cargo {
-    type Output = GeneratedTarball;
+    type Output = Option<GeneratedTarball>;
+    const DEFAULT: bool = true;
     const ONLY_HOSTS: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-        run.path("cargo")
+        let default = should_build_extended_tool(&run.builder, "cargo");
+        run.path("cargo").default_condition(default)
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -971,7 +980,7 @@ impl Step for Cargo {
         });
     }
 
-    fn run(self, builder: &Builder<'_>) -> GeneratedTarball {
+    fn run(self, builder: &Builder<'_>) -> Option<GeneratedTarball> {
         let compiler = self.compiler;
         let target = self.target;
 
@@ -996,7 +1005,7 @@ impl Step for Cargo {
             }
         }
 
-        tarball.generate()
+        Some(tarball.generate())
     }
 }
 
@@ -1009,9 +1018,11 @@ pub struct Rls {
 impl Step for Rls {
     type Output = Option<GeneratedTarball>;
     const ONLY_HOSTS: bool = true;
+    const DEFAULT: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-        run.path("rls")
+        let default = should_build_extended_tool(&run.builder, "rls");
+        run.path("rls").default_condition(default)
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -1028,7 +1039,6 @@ impl Step for Rls {
     fn run(self, builder: &Builder<'_>) -> Option<GeneratedTarball> {
         let compiler = self.compiler;
         let target = self.target;
-        assert!(builder.config.extended);
 
         let rls = builder
             .ensure(tool::Rls { compiler, target, extra_features: Vec::new() })
@@ -1054,10 +1064,12 @@ pub struct RustAnalyzer {
 
 impl Step for RustAnalyzer {
     type Output = Option<GeneratedTarball>;
+    const DEFAULT: bool = true;
     const ONLY_HOSTS: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-        run.path("rust-analyzer")
+        let default = should_build_extended_tool(&run.builder, "rust-analyzer");
+        run.path("rust-analyzer").default_condition(default)
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -1072,9 +1084,14 @@ impl Step for RustAnalyzer {
     }
 
     fn run(self, builder: &Builder<'_>) -> Option<GeneratedTarball> {
+        // This prevents rust-analyzer from being built for "dist" or "install"
+        // on the stable/beta channels. It is a nightly-only tool and should
+        // not be included.
+        if !builder.build.unstable_features() {
+            return None;
+        }
         let compiler = self.compiler;
         let target = self.target;
-        assert!(builder.config.extended);
 
         if target.contains("riscv64") {
             // riscv64 currently has an LLVM bug that makes rust-analyzer unable
@@ -1102,11 +1119,13 @@ pub struct Clippy {
 }
 
 impl Step for Clippy {
-    type Output = GeneratedTarball;
+    type Output = Option<GeneratedTarball>;
+    const DEFAULT: bool = true;
     const ONLY_HOSTS: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-        run.path("clippy")
+        let default = should_build_extended_tool(&run.builder, "clippy");
+        run.path("clippy").default_condition(default)
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -1120,10 +1139,9 @@ impl Step for Clippy {
         });
     }
 
-    fn run(self, builder: &Builder<'_>) -> GeneratedTarball {
+    fn run(self, builder: &Builder<'_>) -> Option<GeneratedTarball> {
         let compiler = self.compiler;
         let target = self.target;
-        assert!(builder.config.extended);
 
         // Prepare the image directory
         // We expect clippy to build, because we've exited this step above if tool
@@ -1141,7 +1159,7 @@ impl Step for Clippy {
         tarball.add_file(clippy, "bin", 0o755);
         tarball.add_file(cargoclippy, "bin", 0o755);
         tarball.add_legal_and_readme_to("share/doc/clippy");
-        tarball.generate()
+        Some(tarball.generate())
     }
 }
 
@@ -1153,10 +1171,12 @@ pub struct Miri {
 
 impl Step for Miri {
     type Output = Option<GeneratedTarball>;
+    const DEFAULT: bool = true;
     const ONLY_HOSTS: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-        run.path("miri")
+        let default = should_build_extended_tool(&run.builder, "miri");
+        run.path("miri").default_condition(default)
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -1171,9 +1191,14 @@ impl Step for Miri {
     }
 
     fn run(self, builder: &Builder<'_>) -> Option<GeneratedTarball> {
+        // This prevents miri from being built for "dist" or "install"
+        // on the stable/beta channels. It is a nightly-only tool and should
+        // not be included.
+        if !builder.build.unstable_features() {
+            return None;
+        }
         let compiler = self.compiler;
         let target = self.target;
-        assert!(builder.config.extended);
 
         let miri = builder
             .ensure(tool::Miri { compiler, target, extra_features: Vec::new() })
@@ -1206,10 +1231,12 @@ pub struct Rustfmt {
 
 impl Step for Rustfmt {
     type Output = Option<GeneratedTarball>;
+    const DEFAULT: bool = true;
     const ONLY_HOSTS: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-        run.path("rustfmt")
+        let default = should_build_extended_tool(&run.builder, "rustfmt");
+        run.path("rustfmt").default_condition(default)
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -1258,10 +1285,17 @@ pub struct RustDemangler {
 
 impl Step for RustDemangler {
     type Output = Option<GeneratedTarball>;
+    const DEFAULT: bool = true;
     const ONLY_HOSTS: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-        run.path("rust-demangler")
+        // While other tools use `should_build_extended_tool` to decide whether to be run by
+        // default or not, `rust-demangler` must be build when *either* it's enabled as a tool like
+        // the other ones or if `profiler = true`. Because we don't know the target at this stage
+        // we run the step by default when only `extended = true`, and decide whether to actually
+        // run it or not later.
+        let default = run.builder.config.extended;
+        run.path("rust-demangler").default_condition(default)
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -1278,11 +1312,11 @@ impl Step for RustDemangler {
     fn run(self, builder: &Builder<'_>) -> Option<GeneratedTarball> {
         let compiler = self.compiler;
         let target = self.target;
-        assert!(builder.config.extended);
 
         // Only build this extended tool if explicitly included in `tools`, or if `profiler = true`
-        let profiler = builder.config.profiler_enabled(target);
-        if !builder.config.tools.as_ref().map_or(profiler, |t| t.contains("rust-demangler")) {
+        let condition = should_build_extended_tool(builder, "rust-demangler")
+            || builder.config.profiler_enabled(target);
+        if builder.config.extended && !condition {
             return None;
         }
 
@@ -1333,51 +1367,44 @@ impl Step for Extended {
 
         builder.info(&format!("Dist extended stage{} ({})", compiler.stage, target));
 
-        let rustc_installer = builder.ensure(Rustc { compiler: builder.compiler(stage, target) });
-        let cargo_installer = builder.ensure(Cargo { compiler, target });
-        let rustfmt_installer = builder.ensure(Rustfmt { compiler, target });
-        let rust_demangler_installer = builder.ensure(RustDemangler { compiler, target });
-        let rls_installer = builder.ensure(Rls { compiler, target });
-        let rust_analyzer_installer = builder.ensure(RustAnalyzer { compiler, target });
-        let llvm_tools_installer = builder.ensure(LlvmTools { target });
-        let clippy_installer = builder.ensure(Clippy { compiler, target });
-        let miri_installer = builder.ensure(Miri { compiler, target });
-        let mingw_installer = builder.ensure(Mingw { host: target });
-        let analysis_installer = builder.ensure(Analysis { compiler, target });
-
-        let docs_installer = builder.ensure(Docs { host: target });
-        let std_installer = builder.ensure(Std { compiler, target });
-
-        let etc = builder.src.join("src/etc/installer");
-
-        // Avoid producing tarballs during a dry run.
-        if builder.config.dry_run {
-            return;
+        let mut tarballs = Vec::new();
+        let mut built_tools = HashSet::new();
+        macro_rules! add_component {
+            ($name:expr => $step:expr) => {
+                if let Some(tarball) = builder.ensure_if_default($step) {
+                    tarballs.push(tarball);
+                    built_tools.insert($name);
+                }
+            };
         }
 
         // When rust-std package split from rustc, we needed to ensure that during
         // upgrades rustc was upgraded before rust-std. To avoid rustc clobbering
         // the std files during uninstall. To do this ensure that rustc comes
         // before rust-std in the list below.
-        let mut tarballs = Vec::new();
-        tarballs.push(rustc_installer);
-        tarballs.push(cargo_installer);
-        tarballs.push(clippy_installer);
-        tarballs.extend(rust_demangler_installer.clone());
-        tarballs.extend(rls_installer.clone());
-        tarballs.extend(rust_analyzer_installer.clone());
-        tarballs.extend(miri_installer.clone());
-        tarballs.extend(rustfmt_installer.clone());
-        tarballs.extend(llvm_tools_installer);
-        if let Some(analysis_installer) = analysis_installer {
-            tarballs.push(analysis_installer);
+        tarballs.push(builder.ensure(Rustc { compiler: builder.compiler(stage, target) }));
+        tarballs.push(builder.ensure(Std { compiler, target }).expect("missing std"));
+
+        if target.contains("windows-gnu") {
+            tarballs.push(builder.ensure(Mingw { host: target }).expect("missing mingw"));
         }
-        tarballs.push(std_installer.expect("missing std"));
-        if let Some(docs_installer) = docs_installer {
-            tarballs.push(docs_installer);
-        }
-        if target.contains("pc-windows-gnu") {
-            tarballs.push(mingw_installer.unwrap());
+
+        add_component!("rust-docs" => Docs { host: target });
+        add_component!("rust-demangler"=> RustDemangler { compiler, target });
+        add_component!("cargo" => Cargo { compiler, target });
+        add_component!("rustfmt" => Rustfmt { compiler, target });
+        add_component!("rls" => Rls { compiler, target });
+        add_component!("rust-analyzer" => RustAnalyzer { compiler, target });
+        add_component!("llvm-components" => LlvmTools { target });
+        add_component!("clippy" => Clippy { compiler, target });
+        add_component!("miri" => Miri { compiler, target });
+        add_component!("analysis" => Analysis { compiler, target });
+
+        let etc = builder.src.join("src/etc/installer");
+
+        // Avoid producing tarballs during a dry run.
+        if builder.config.dry_run {
+            return;
         }
 
         let tarball = Tarball::new(builder, "rust", &target.triple);
@@ -1422,20 +1449,10 @@ impl Step for Extended {
 
         let xform = |p: &Path| {
             let mut contents = t!(fs::read_to_string(p));
-            if rust_demangler_installer.is_none() {
-                contents = filter(&contents, "rust-demangler");
-            }
-            if rls_installer.is_none() {
-                contents = filter(&contents, "rls");
-            }
-            if rust_analyzer_installer.is_none() {
-                contents = filter(&contents, "rust-analyzer");
-            }
-            if miri_installer.is_none() {
-                contents = filter(&contents, "miri");
-            }
-            if rustfmt_installer.is_none() {
-                contents = filter(&contents, "rustfmt");
+            for tool in &["rust-demangler", "rls", "rust-analyzer", "miri", "rustfmt"] {
+                if !built_tools.contains(tool) {
+                    contents = filter(&contents, tool);
+                }
             }
             let ret = tmp.join(p.file_name().unwrap());
             t!(fs::write(&ret, &contents));
@@ -1473,19 +1490,11 @@ impl Step for Extended {
             prepare("rust-std");
             prepare("rust-analysis");
             prepare("clippy");
-            if rust_demangler_installer.is_some() {
-                prepare("rust-demangler");
+            for tool in &["rust-demangler", "rls", "rust-analyzer", "miri"] {
+                if built_tools.contains(tool) {
+                    prepare(tool);
+                }
             }
-            if rls_installer.is_some() {
-                prepare("rls");
-            }
-            if rust_analyzer_installer.is_some() {
-                prepare("rust-analyzer");
-            }
-            if miri_installer.is_some() {
-                prepare("miri");
-            }
-
             // create an 'uninstall' package
             builder.install(&etc.join("pkg/postinstall"), &pkg.join("uninstall"), 0o755);
             pkgbuild("uninstall");
@@ -1542,17 +1551,10 @@ impl Step for Extended {
             prepare("rust-docs");
             prepare("rust-std");
             prepare("clippy");
-            if rust_demangler_installer.is_some() {
-                prepare("rust-demangler");
-            }
-            if rls_installer.is_some() {
-                prepare("rls");
-            }
-            if rust_analyzer_installer.is_some() {
-                prepare("rust-analyzer");
-            }
-            if miri_installer.is_some() {
-                prepare("miri");
+            for tool in &["rust-demangler", "rls", "rust-analyzer", "miri"] {
+                if built_tools.contains(tool) {
+                    prepare(tool);
+                }
             }
             if target.contains("windows-gnu") {
                 prepare("rust-mingw");
@@ -1631,7 +1633,7 @@ impl Step for Extended {
                     .arg("-out")
                     .arg(exe.join("StdGroup.wxs")),
             );
-            if rls_installer.is_some() {
+            if built_tools.contains("rls") {
                 builder.run(
                     Command::new(&heat)
                         .current_dir(&exe)
@@ -1650,7 +1652,7 @@ impl Step for Extended {
                         .arg(etc.join("msi/remove-duplicates.xsl")),
                 );
             }
-            if rust_analyzer_installer.is_some() {
+            if built_tools.contains("rust-analyzer") {
                 builder.run(
                     Command::new(&heat)
                         .current_dir(&exe)
@@ -1686,7 +1688,7 @@ impl Step for Extended {
                     .arg("-t")
                     .arg(etc.join("msi/remove-duplicates.xsl")),
             );
-            if rust_demangler_installer.is_some() {
+            if built_tools.contains("rust-demangler") {
                 builder.run(
                     Command::new(&heat)
                         .current_dir(&exe)
@@ -1705,7 +1707,7 @@ impl Step for Extended {
                         .arg(etc.join("msi/remove-duplicates.xsl")),
                 );
             }
-            if miri_installer.is_some() {
+            if built_tools.contains("miri") {
                 builder.run(
                     Command::new(&heat)
                         .current_dir(&exe)
@@ -1778,16 +1780,16 @@ impl Step for Extended {
                     .arg(&input);
                 add_env(builder, &mut cmd, target);
 
-                if rust_demangler_installer.is_some() {
+                if built_tools.contains("rust-demangler") {
                     cmd.arg("-dRustDemanglerDir=rust-demangler");
                 }
-                if rls_installer.is_some() {
+                if built_tools.contains("rls") {
                     cmd.arg("-dRlsDir=rls");
                 }
-                if rust_analyzer_installer.is_some() {
+                if built_tools.contains("rust-analyzer") {
                     cmd.arg("-dRustAnalyzerDir=rust-analyzer");
                 }
-                if miri_installer.is_some() {
+                if built_tools.contains("miri") {
                     cmd.arg("-dMiriDir=miri");
                 }
                 if target.contains("windows-gnu") {
@@ -1803,16 +1805,16 @@ impl Step for Extended {
             candle("CargoGroup.wxs".as_ref());
             candle("StdGroup.wxs".as_ref());
             candle("ClippyGroup.wxs".as_ref());
-            if rust_demangler_installer.is_some() {
+            if built_tools.contains("rust-demangler") {
                 candle("RustDemanglerGroup.wxs".as_ref());
             }
-            if rls_installer.is_some() {
+            if built_tools.contains("rls") {
                 candle("RlsGroup.wxs".as_ref());
             }
-            if rust_analyzer_installer.is_some() {
+            if built_tools.contains("rust-analyzer") {
                 candle("RustAnalyzerGroup.wxs".as_ref());
             }
-            if miri_installer.is_some() {
+            if built_tools.contains("miri") {
                 candle("MiriGroup.wxs".as_ref());
             }
             candle("AnalysisGroup.wxs".as_ref());
@@ -1846,16 +1848,16 @@ impl Step for Extended {
                 .arg("ClippyGroup.wixobj")
                 .current_dir(&exe);
 
-            if rls_installer.is_some() {
+            if built_tools.contains("rls") {
                 cmd.arg("RlsGroup.wixobj");
             }
-            if rust_analyzer_installer.is_some() {
+            if built_tools.contains("rust-analyzer") {
                 cmd.arg("RustAnalyzerGroup.wixobj");
             }
-            if rust_demangler_installer.is_some() {
+            if built_tools.contains("rust-demangler") {
                 cmd.arg("RustDemanglerGroup.wixobj");
             }
-            if miri_installer.is_some() {
+            if built_tools.contains("miri") {
                 cmd.arg("MiriGroup.wixobj");
             }
 
@@ -1943,8 +1945,16 @@ fn maybe_install_llvm(builder: &Builder<'_>, target: TargetSelection, dst_libdir
         cmd.arg("--libfiles");
         builder.verbose(&format!("running {:?}", cmd));
         let files = output(&mut cmd);
+        let build_llvm_out = &builder.llvm_out(builder.config.build);
+        let target_llvm_out = &builder.llvm_out(target);
         for file in files.trim_end().split(' ') {
-            builder.install(Path::new(file), dst_libdir, 0o644);
+            // If we're not using a custom LLVM, make sure we package for the target.
+            let file = if let Ok(relative_path) = Path::new(file).strip_prefix(build_llvm_out) {
+                target_llvm_out.join(relative_path)
+            } else {
+                PathBuf::from(file)
+            };
+            builder.install(&file, dst_libdir, 0o644);
         }
         !builder.config.dry_run
     } else {
@@ -1983,9 +1993,11 @@ pub struct LlvmTools {
 impl Step for LlvmTools {
     type Output = Option<GeneratedTarball>;
     const ONLY_HOSTS: bool = true;
+    const DEFAULT: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-        run.path("llvm-tools")
+        let default = should_build_extended_tool(&run.builder, "llvm-tools");
+        run.path("llvm-tools").default_condition(default)
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -1994,7 +2006,6 @@ impl Step for LlvmTools {
 
     fn run(self, builder: &Builder<'_>) -> Option<GeneratedTarball> {
         let target = self.target;
-        assert!(builder.config.extended);
 
         /* run only if llvm-config isn't used */
         if let Some(config) = builder.config.target_config.get(&target) {
@@ -2148,10 +2159,16 @@ impl Step for ReproducibleArtifacts {
     }
 
     fn run(self, builder: &Builder<'_>) -> Self::Output {
-        let path = builder.config.rust_profile_use.as_ref()?;
-
+        let mut added_anything = false;
         let tarball = Tarball::new(builder, "reproducible-artifacts", &self.target.triple);
-        tarball.add_file(path, ".", 0o644);
-        Some(tarball.generate())
+        if let Some(path) = builder.config.rust_profile_use.as_ref() {
+            tarball.add_file(path, ".", 0o644);
+            added_anything = true;
+        }
+        if let Some(path) = builder.config.llvm_profile_use.as_ref() {
+            tarball.add_file(path, ".", 0o644);
+            added_anything = true;
+        }
+        if added_anything { Some(tarball.generate()) } else { None }
     }
 }

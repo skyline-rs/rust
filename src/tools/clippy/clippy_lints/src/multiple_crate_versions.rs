@@ -1,7 +1,7 @@
 //! lint on multiple versions of a crate being used
 
 use clippy_utils::diagnostics::span_lint;
-use clippy_utils::run_lints;
+use clippy_utils::is_lint_allowed;
 use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_hir::{Crate, CRATE_HIR_ID};
 use rustc_lint::{LateContext, LateLintPass};
@@ -13,17 +13,20 @@ use if_chain::if_chain;
 use itertools::Itertools;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks to see if multiple versions of a crate are being
+    /// ### What it does
+    /// Checks to see if multiple versions of a crate are being
     /// used.
     ///
-    /// **Why is this bad?** This bloats the size of targets, and can lead to
+    /// ### Why is this bad?
+    /// This bloats the size of targets, and can lead to
     /// confusing error messages when structs or traits are used interchangeably
     /// between different versions of a crate.
     ///
-    /// **Known problems:** Because this can be caused purely by the dependencies
+    /// ### Known problems
+    /// Because this can be caused purely by the dependencies
     /// themselves, it's not always possible to fix this issue.
     ///
-    /// **Example:**
+    /// ### Example
     /// ```toml
     /// # This will pull in both winapi v0.3.x and v0.2.x, triggering a warning.
     /// [dependencies]
@@ -39,7 +42,7 @@ declare_lint_pass!(MultipleCrateVersions => [MULTIPLE_CRATE_VERSIONS]);
 
 impl LateLintPass<'_> for MultipleCrateVersions {
     fn check_crate(&mut self, cx: &LateContext<'_>, _: &Crate<'_>) {
-        if !run_lints(cx, &[MULTIPLE_CRATE_VERSIONS], CRATE_HIR_ID) {
+        if is_lint_allowed(cx, MULTIPLE_CRATE_VERSIONS, CRATE_HIR_ID) {
             return;
         }
 

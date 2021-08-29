@@ -1,6 +1,5 @@
-//check-pass
-#![feature(capture_disjoint_fields)]
-//~^ WARNING: the feature `capture_disjoint_fields` is incomplete
+// edition:2021
+// check-pass
 #![warn(unused)]
 
 struct Point {
@@ -44,7 +43,6 @@ fn test3() {
 
 fn test4() {
     let t = (String::from("Hello"), String::from("World"));
-    //~^ WARN unused variable: `t`
 
     let c = ||  {
         let (_, _) = t;
@@ -82,9 +80,7 @@ fn test7() {
 
 fn test8() {
     let x = 0;
-    //~^ WARN unused variable: `x`
     let tup = (1, 2);
-    //~^ WARN unused variable: `tup`
     let p = Point { x: 10, y: 20 };
 
     let c = || {

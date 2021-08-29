@@ -72,7 +72,7 @@ use rustc_hir::LangItem::{ResultErr, ResultOk};
 use rustc_hir::{
     def, Arm, BindingAnnotation, Block, Body, Constness, Destination, Expr, ExprKind, FnDecl, GenericArgs, HirId, Impl,
     ImplItem, ImplItemKind, IsAsync, Item, ItemKind, LangItem, Local, MatchSource, Node, Param, Pat, PatKind, Path,
-    PathSegment, QPath, Stmt, StmtKind, TraitItem, TraitItemKind, TraitRef, TyKind,
+    PathSegment, PrimTy, QPath, Stmt, StmtKind, TraitItem, TraitItemKind, TraitRef, TyKind, UnOp,
 };
 use rustc_lint::{LateContext, Level, Lint, LintContext};
 use rustc_middle::hir::exports::Export;
@@ -254,8 +254,12 @@ pub fn in_macro(span: Span) -> bool {
     }
 }
 
+pub fn is_unit_expr(expr: &Expr<'_>) -> bool {
+    matches!(expr.kind, ExprKind::Block(Block { stmts: [], expr: None, .. }, _) | ExprKind::Tup([]))
+}
+
 /// Checks if given pattern is a wildcard (`_`)
-pub fn is_wild<'tcx>(pat: &impl std::ops::Deref<Target = Pat<'tcx>>) -> bool {
+pub fn is_wild(pat: &Pat<'_>) -> bool {
     matches!(pat.kind, PatKind::Wild)
 }
 
@@ -326,14 +330,23 @@ pub fn is_trait_method(cx: &LateContext<'_>, expr: &Expr<'_>, diag_item: Symbol)
         .map_or(false, |did| is_diag_trait_item(cx, did, diag_item))
 }
 
-/// Checks if an expression references a variable of the given name.
-pub fn match_var(expr: &Expr<'_>, var: Symbol) -> bool {
-    if let ExprKind::Path(QPath::Resolved(None, path)) = expr.kind {
-        if let [p] = path.segments {
-            return p.ident.name == var;
-        }
+/// Checks if the given expression is a path referring an item on the trait
+/// that is marked with the given diagnostic item.
+///
+/// For checking method call expressions instead of path expressions, use
+/// [`is_trait_method`].
+///
+/// For example, this can be used to find if an expression like `u64::default`
+/// refers to an item of the trait `Default`, which is associated with the
+/// `diag_item` of `sym::Default`.
+pub fn is_trait_item(cx: &LateContext<'_>, expr: &Expr<'_>, diag_item: Symbol) -> bool {
+    if let hir::ExprKind::Path(ref qpath) = expr.kind {
+        cx.qpath_res(qpath, expr.hir_id)
+            .opt_def_id()
+            .map_or(false, |def_id| is_diag_trait_item(cx, def_id, diag_item))
+    } else {
+        false
     }
-    false
 }
 
 pub fn last_path_segment<'tcx>(path: &QPath<'tcx>) -> &'tcx PathSegment<'tcx> {
@@ -421,10 +434,20 @@ pub fn is_qpath_def_path(cx: &LateContext<'_>, path: &QPath<'_>, hir_id: HirId, 
 }
 
 /// If the expression is a path, resolves it to a `DefId` and checks if it matches the given path.
+///
+/// Please use `is_expr_diagnostic_item` if the target is a diagnostic item.
 pub fn is_expr_path_def_path(cx: &LateContext<'_>, expr: &Expr<'_>, segments: &[&str]) -> bool {
     expr_path_res(cx, expr)
         .opt_def_id()
         .map_or(false, |id| match_def_path(cx, id, segments))
+}
+
+/// If the expression is a path, resolves it to a `DefId` and checks if it matches the given
+/// diagnostic item.
+pub fn is_expr_diagnostic_item(cx: &LateContext<'_>, expr: &Expr<'_>, diag_item: Symbol) -> bool {
+    expr_path_res(cx, expr)
+        .opt_def_id()
+        .map_or(false, |id| cx.tcx.is_diagnostic_item(diag_item, id))
 }
 
 /// THIS METHOD IS DEPRECATED and will eventually be removed since it does not match against the
@@ -490,10 +513,13 @@ pub fn path_to_res(cx: &LateContext<'_>, path: &[&str]) -> Res {
 
     let (krate, first, path) = match *path {
         [krate, first, ref path @ ..] => (krate, first, path),
+        [primitive] => {
+            return PrimTy::from_name(Symbol::intern(primitive)).map_or(Res::Err, Res::PrimTy);
+        },
         _ => return Res::Err,
     };
     let tcx = cx.tcx;
-    let crates = tcx.crates();
+    let crates = tcx.crates(());
     let krate = try_res!(crates.iter().find(|&&num| tcx.crate_name(num).as_str() == krate));
     let first = try_res!(item_child_by_name(tcx, krate.as_def_id(), first));
     let last = path
@@ -553,6 +579,54 @@ pub fn trait_ref_of_method<'tcx>(cx: &LateContext<'tcx>, hir_id: HirId) -> Optio
         then { return impl_.of_trait.as_ref(); }
     }
     None
+}
+
+/// This method will return tuple of projection stack and root of the expression,
+/// used in `can_mut_borrow_both`.
+///
+/// For example, if `e` represents the `v[0].a.b[x]`
+/// this method will return a tuple, composed of a `Vec`
+/// containing the `Expr`s for `v[0], v[0].a, v[0].a.b, v[0].a.b[x]`
+/// and an `Expr` for root of them, `v`
+fn projection_stack<'a, 'hir>(mut e: &'a Expr<'hir>) -> (Vec<&'a Expr<'hir>>, &'a Expr<'hir>) {
+    let mut result = vec![];
+    let root = loop {
+        match e.kind {
+            ExprKind::Index(ep, _) | ExprKind::Field(ep, _) => {
+                result.push(e);
+                e = ep;
+            },
+            _ => break e,
+        };
+    };
+    result.reverse();
+    (result, root)
+}
+
+/// Checks if two expressions can be mutably borrowed simultaneously
+/// and they aren't dependent on borrowing same thing twice
+pub fn can_mut_borrow_both(cx: &LateContext<'_>, e1: &Expr<'_>, e2: &Expr<'_>) -> bool {
+    let (s1, r1) = projection_stack(e1);
+    let (s2, r2) = projection_stack(e2);
+    if !eq_expr_value(cx, r1, r2) {
+        return true;
+    }
+    for (x1, x2) in s1.iter().zip(s2.iter()) {
+        match (&x1.kind, &x2.kind) {
+            (ExprKind::Field(_, i1), ExprKind::Field(_, i2)) => {
+                if i1 != i2 {
+                    return true;
+                }
+            },
+            (ExprKind::Index(_, i1), ExprKind::Index(_, i2)) => {
+                if !eq_expr_value(cx, i1, i2) {
+                    return false;
+                }
+            },
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// Checks if the top level expression can be moved into a closure as is.
@@ -707,16 +781,6 @@ pub fn get_item_name(cx: &LateContext<'_>, expr: &Expr<'_>) -> Option<Symbol> {
     }
 }
 
-/// Gets the name of a `Pat`, if any.
-pub fn get_pat_name(pat: &Pat<'_>) -> Option<Symbol> {
-    match pat.kind {
-        PatKind::Binding(.., ref spname, _) => Some(spname.name),
-        PatKind::Path(ref qpath) => single_segment_path(qpath).map(|ps| ps.ident.name),
-        PatKind::Box(p) | PatKind::Ref(p, _) => get_pat_name(&*p),
-        _ => None,
-    }
-}
-
 pub struct ContainsName {
     pub name: Symbol,
     pub result: bool,
@@ -817,7 +881,7 @@ fn line_span<T: LintContext>(cx: &T, span: Span) -> Span {
     let source_map_and_line = cx.sess().source_map().lookup_line(span.lo()).unwrap();
     let line_no = source_map_and_line.line;
     let line_start = source_map_and_line.sf.lines[line_no];
-    Span::new(line_start, span.hi(), span.ctxt())
+    span.with_lo(line_start)
 }
 
 /// Gets the parent node, if any.
@@ -861,14 +925,16 @@ pub fn get_enclosing_block<'tcx>(cx: &LateContext<'tcx>, hir_id: HirId) -> Optio
     })
 }
 
-/// Gets the loop enclosing the given expression, if any.
-pub fn get_enclosing_loop(tcx: TyCtxt<'tcx>, expr: &Expr<'_>) -> Option<&'tcx Expr<'tcx>> {
+/// Gets the loop or closure enclosing the given expression, if any.
+pub fn get_enclosing_loop_or_closure(tcx: TyCtxt<'tcx>, expr: &Expr<'_>) -> Option<&'tcx Expr<'tcx>> {
     let map = tcx.hir();
     for (_, node) in map.parent_iter(expr.hir_id) {
         match node {
             Node::Expr(
-                e @ Expr {
-                    kind: ExprKind::Loop(..),
+                e
+                @
+                Expr {
+                    kind: ExprKind::Loop(..) | ExprKind::Closure(..),
                     ..
                 },
             ) => return Some(e),
@@ -899,17 +965,6 @@ pub fn is_else_clause(tcx: TyCtxt<'_>, expr: &Expr<'_>) -> bool {
     let map = tcx.hir();
     let mut iter = map.parent_iter(expr.hir_id);
     match iter.next() {
-        Some((arm_id, Node::Arm(..))) => matches!(
-            iter.next(),
-            Some((
-                _,
-                Node::Expr(Expr {
-                    kind: ExprKind::Match(_, [_, else_arm], MatchSource::IfLetDesugar { .. }),
-                    ..
-                })
-            ))
-            if else_arm.hir_id == arm_id
-        ),
         Some((
             _,
             Node::Expr(Expr {
@@ -927,12 +982,8 @@ pub fn is_integer_const(cx: &LateContext<'_>, e: &Expr<'_>, value: u128) -> bool
     if is_integer_literal(e, value) {
         return true;
     }
-    let map = cx.tcx.hir();
-    let parent_item = map.get_parent_item(e.hir_id);
-    if let Some((Constant::Int(v), _)) = map
-        .maybe_body_owned_by(parent_item)
-        .and_then(|body_id| constant(cx, cx.tcx.typeck_body(body_id), e))
-    {
+    let enclosing_body = cx.tcx.hir().local_def_id(cx.tcx.hir().enclosing_body_owner(e.hir_id));
+    if let Some((Constant::Int(v), _)) = constant(cx, cx.tcx.typeck(enclosing_body), e) {
         value == v
     } else {
         false
@@ -971,12 +1022,7 @@ pub fn is_expn_of(mut span: Span, name: &str) -> Option<Span> {
             let data = span.ctxt().outer_expn_data();
             let new_span = data.call_site;
 
-            if let ExpnKind::Macro {
-                kind: MacroKind::Bang,
-                name: mac_name,
-                proc_macro: _,
-            } = data.kind
-            {
+            if let ExpnKind::Macro(MacroKind::Bang, mac_name) = data.kind {
                 if mac_name.as_str() == name {
                     return Some(new_span);
                 }
@@ -1004,12 +1050,7 @@ pub fn is_direct_expn_of(span: Span, name: &str) -> Option<Span> {
         let data = span.ctxt().outer_expn_data();
         let new_span = data.call_site;
 
-        if let ExpnKind::Macro {
-            kind: MacroKind::Bang,
-            name: mac_name,
-            proc_macro: _,
-        } = data.kind
-        {
+        if let ExpnKind::Macro(MacroKind::Bang, mac_name) = data.kind {
             if mac_name.as_str() == name {
                 return Some(new_span);
             }
@@ -1051,8 +1092,8 @@ pub fn is_refutable(cx: &LateContext<'_>, pat: &Pat<'_>) -> bool {
         )
     }
 
-    fn are_refutable<'a, I: Iterator<Item = &'a Pat<'a>>>(cx: &LateContext<'_>, mut i: I) -> bool {
-        i.any(|pat| is_refutable(cx, pat))
+    fn are_refutable<'a, I: IntoIterator<Item = &'a Pat<'a>>>(cx: &LateContext<'_>, i: I) -> bool {
+        i.into_iter().any(|pat| is_refutable(cx, pat))
     }
 
     match pat.kind {
@@ -1063,24 +1104,20 @@ pub fn is_refutable(cx: &LateContext<'_>, pat: &Pat<'_>) -> bool {
         PatKind::Path(ref qpath) => is_enum_variant(cx, qpath, pat.hir_id),
         PatKind::Or(pats) => {
             // TODO: should be the honest check, that pats is exhaustive set
-            are_refutable(cx, pats.iter().map(|pat| &**pat))
+            are_refutable(cx, pats)
         },
-        PatKind::Tuple(pats, _) => are_refutable(cx, pats.iter().map(|pat| &**pat)),
+        PatKind::Tuple(pats, _) => are_refutable(cx, pats),
         PatKind::Struct(ref qpath, fields, _) => {
             is_enum_variant(cx, qpath, pat.hir_id) || are_refutable(cx, fields.iter().map(|field| &*field.pat))
         },
-        PatKind::TupleStruct(ref qpath, pats, _) => {
-            is_enum_variant(cx, qpath, pat.hir_id) || are_refutable(cx, pats.iter().map(|pat| &**pat))
-        },
-        PatKind::Slice(head, ref middle, tail) => {
+        PatKind::TupleStruct(ref qpath, pats, _) => is_enum_variant(cx, qpath, pat.hir_id) || are_refutable(cx, pats),
+        PatKind::Slice(head, middle, tail) => {
             match &cx.typeck_results().node_type(pat.hir_id).kind() {
                 rustc_ty::Slice(..) => {
                     // [..] is the only irrefutable slice pattern.
                     !head.is_empty() || middle.is_none() || !tail.is_empty()
                 },
-                rustc_ty::Array(..) => {
-                    are_refutable(cx, head.iter().chain(middle).chain(tail.iter()).map(|pat| &**pat))
-                },
+                rustc_ty::Array(..) => are_refutable(cx, head.iter().chain(middle).chain(tail.iter())),
                 _ => {
                     // unreachable!()
                     true
@@ -1094,7 +1131,7 @@ pub fn is_refutable(cx: &LateContext<'_>, pat: &Pat<'_>) -> bool {
 /// the function once on the given pattern.
 pub fn recurse_or_patterns<'tcx, F: FnMut(&'tcx Pat<'tcx>)>(pat: &'tcx Pat<'tcx>, mut f: F) {
     if let PatKind::Or(pats) = pat.kind {
-        pats.iter().copied().for_each(f);
+        pats.iter().for_each(f);
     } else {
         f(pat);
     }
@@ -1191,7 +1228,7 @@ pub fn is_try<'tcx>(cx: &LateContext<'_>, expr: &'tcx Expr<'tcx>) -> Option<&'tc
 /// Returns `true` if the lint is allowed in the current context
 ///
 /// Useful for skipping long running code when it's unnecessary
-pub fn is_allowed(cx: &LateContext<'_>, lint: &'static Lint, id: HirId) -> bool {
+pub fn is_lint_allowed(cx: &LateContext<'_>, lint: &'static Lint, id: HirId) -> bool {
     cx.tcx.lint_level_at_node(lint, id).0 == Level::Allow
 }
 
@@ -1267,11 +1304,21 @@ pub fn match_function_call<'tcx>(
 
 /// Checks if the given `DefId` matches any of the paths. Returns the index of matching path, if
 /// any.
+///
+/// Please use `match_any_diagnostic_items` if the targets are all diagnostic items.
 pub fn match_any_def_paths(cx: &LateContext<'_>, did: DefId, paths: &[&[&str]]) -> Option<usize> {
     let search_path = cx.get_def_path(did);
     paths
         .iter()
         .position(|p| p.iter().map(|x| Symbol::intern(x)).eq(search_path.iter().copied()))
+}
+
+/// Checks if the given `DefId` matches any of provided diagnostic items. Returns the index of
+/// matching path, if any.
+pub fn match_any_diagnostic_items(cx: &LateContext<'_>, def_id: DefId, diag_items: &[Symbol]) -> Option<usize> {
+    diag_items
+        .iter()
+        .position(|item| cx.tcx.is_diagnostic_item(*item, def_id))
 }
 
 /// Checks if the given `DefId` matches the path.
@@ -1316,15 +1363,15 @@ pub fn if_sequence<'tcx>(mut expr: &'tcx Expr<'tcx>) -> (Vec<&'tcx Expr<'tcx>>, 
     let mut conds = Vec::new();
     let mut blocks: Vec<&Block<'_>> = Vec::new();
 
-    while let ExprKind::If(cond, then_expr, ref else_expr) = expr.kind {
-        conds.push(cond);
-        if let ExprKind::Block(block, _) = then_expr.kind {
+    while let Some(higher::IfOrIfLet { cond, then, r#else }) = higher::IfOrIfLet::hir(expr) {
+        conds.push(&*cond);
+        if let ExprKind::Block(ref block, _) = then.kind {
             blocks.push(block);
         } else {
             panic!("ExprKind::If node is not an ExprKind::Block");
         }
 
-        if let Some(else_expr) = *else_expr {
+        if let Some(ref else_expr) = r#else {
             expr = else_expr;
         } else {
             break;
@@ -1397,6 +1444,55 @@ pub fn is_must_use_func_call(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     };
 
     did.map_or(false, |did| must_use_attr(cx.tcx.get_attrs(did)).is_some())
+}
+
+/// Checks if an expression represents the identity function
+/// Only examines closures and `std::convert::identity`
+pub fn is_expr_identity_function(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
+    /// Checks if a function's body represents the identity function. Looks for bodies of the form:
+    /// * `|x| x`
+    /// * `|x| return x`
+    /// * `|x| { return x }`
+    /// * `|x| { return x; }`
+    fn is_body_identity_function(cx: &LateContext<'_>, func: &Body<'_>) -> bool {
+        let id = if_chain! {
+            if let [param] = func.params;
+            if let PatKind::Binding(_, id, _, _) = param.pat.kind;
+            then {
+                id
+            } else {
+                return false;
+            }
+        };
+
+        let mut expr = &func.value;
+        loop {
+            match expr.kind {
+                #[rustfmt::skip]
+                ExprKind::Block(&Block { stmts: [], expr: Some(e), .. }, _, )
+                | ExprKind::Ret(Some(e)) => expr = e,
+                #[rustfmt::skip]
+                ExprKind::Block(&Block { stmts: [stmt], expr: None, .. }, _) => {
+                    if_chain! {
+                        if let StmtKind::Semi(e) | StmtKind::Expr(e) = stmt.kind;
+                        if let ExprKind::Ret(Some(ret_val)) = e.kind;
+                        then {
+                            expr = ret_val;
+                        } else {
+                            return false;
+                        }
+                    }
+                },
+                _ => return path_to_local_id(expr, id) && cx.typeck_results().expr_adjustments(expr).is_empty(),
+            }
+        }
+    }
+
+    match expr.kind {
+        ExprKind::Closure(_, _, body_id, _, _) => is_body_identity_function(cx, cx.tcx.hir().body(body_id)),
+        ExprKind::Path(ref path) => is_qpath_def_path(cx, path, expr.hir_id, &paths::CONVERT_IDENTITY),
+        _ => false,
+    }
 }
 
 /// Gets the node where an expression is either used, or it's type is unified with another branch.
@@ -1485,7 +1581,7 @@ pub fn fn_has_unsatisfiable_preds(cx: &LateContext<'_>, did: DefId) -> bool {
         .predicates_of(did)
         .predicates
         .iter()
-        .filter_map(|(p, _)| if p.is_global() { Some(*p) } else { None });
+        .filter_map(|(p, _)| if p.is_global(cx.tcx) { Some(*p) } else { None });
     traits::impossible_predicates(
         cx.tcx,
         traits::elaborate_predicates(cx.tcx, predicates)
@@ -1510,25 +1606,6 @@ pub fn fn_def_id(cx: &LateContext<'_>, expr: &Expr<'_>) -> Option<DefId> {
     }
 }
 
-/// This function checks if any of the lints in the slice is enabled for the provided `HirId`.
-/// A lint counts as enabled with any of the levels: `Level::Forbid` | `Level::Deny` | `Level::Warn`
-///
-/// ```ignore
-/// #[deny(clippy::YOUR_AWESOME_LINT)]
-/// println!("Hello, World!"); // <- Clippy code: run_lints(cx, &[YOUR_AWESOME_LINT], id) == true
-///
-/// #[allow(clippy::YOUR_AWESOME_LINT)]
-/// println!("See you soon!"); // <- Clippy code: run_lints(cx, &[YOUR_AWESOME_LINT], id) == false
-/// ```
-pub fn run_lints(cx: &LateContext<'_>, lints: &[&'static Lint], id: HirId) -> bool {
-    lints.iter().any(|lint| {
-        matches!(
-            cx.tcx.lint_level_at_node(lint, id),
-            (Level::Forbid | Level::Deny | Level::Warn, _)
-        )
-    })
-}
-
 /// Returns Option<String> where String is a textual representation of the type encapsulated in the
 /// slice iff the given expression is a slice of primitives (as defined in the
 /// `is_recursively_primitive_type` function) and None otherwise.
@@ -1550,7 +1627,7 @@ pub fn is_slice_of_primitives(cx: &LateContext<'_>, expr: &Expr<'_>) -> Option<S
     if is_primitive {
         // if we have wrappers like Array, Slice or Tuple, print these
         // and get the type enclosed in the slice ref
-        match expr_type.peel_refs().walk().nth(1).unwrap().expect_ty().kind() {
+        match expr_type.peel_refs().walk(cx.tcx).nth(1).unwrap().expect_ty().kind() {
             rustc_ty::Slice(..) => return Some("slice".into()),
             rustc_ty::Array(..) => return Some("array".into()),
             rustc_ty::Tuple(..) => return Some("tuple".into()),
@@ -1558,7 +1635,7 @@ pub fn is_slice_of_primitives(cx: &LateContext<'_>, expr: &Expr<'_>) -> Option<S
                 // is_recursively_primitive_type() should have taken care
                 // of the rest and we can rely on the type that is found
                 let refs_peeled = expr_type.peel_refs();
-                return Some(refs_peeled.walk().last().unwrap().to_string());
+                return Some(refs_peeled.walk(cx.tcx).last().unwrap().to_string());
             },
         }
     }
@@ -1654,6 +1731,19 @@ pub fn peel_hir_expr_refs(expr: &'a Expr<'a>) -> (&'a Expr<'a>, usize) {
     (e, count)
 }
 
+/// Removes `AddrOf` operators (`&`) or deref operators (`*`), but only if a reference type is
+/// dereferenced. An overloaded deref such as `Vec` to slice would not be removed.
+pub fn peel_ref_operators<'hir>(cx: &LateContext<'_>, mut expr: &'hir Expr<'hir>) -> &'hir Expr<'hir> {
+    loop {
+        match expr.kind {
+            ExprKind::AddrOf(_, _, e) => expr = e,
+            ExprKind::Unary(UnOp::Deref, e) if cx.typeck_results().expr_ty(e).is_ref() => expr = e,
+            _ => break,
+        }
+    }
+    expr
+}
+
 #[macro_export]
 macro_rules! unwrap_cargo_metadata {
     ($cx: ident, $lint: ident, $deps: expr) => {{
@@ -1682,4 +1772,47 @@ pub fn is_hir_ty_cfg_dependant(cx: &LateContext<'_>, ty: &hir::Ty<'_>) -> bool {
             false
         }
     }
+}
+
+/// Checks whether item either has `test` attribute applied, or
+/// is a module with `test` in its name.
+pub fn is_test_module_or_function(tcx: TyCtxt<'_>, item: &Item<'_>) -> bool {
+    if let Some(def_id) = tcx.hir().opt_local_def_id(item.hir_id()) {
+        if tcx.has_attr(def_id.to_def_id(), sym::test) {
+            return true;
+        }
+    }
+
+    matches!(item.kind, ItemKind::Mod(..)) && item.ident.name.as_str().contains("test")
+}
+
+macro_rules! op_utils {
+    ($($name:ident $assign:ident)*) => {
+        /// Binary operation traits like `LangItem::Add`
+        pub static BINOP_TRAITS: &[LangItem] = &[$(LangItem::$name,)*];
+
+        /// Operator-Assign traits like `LangItem::AddAssign`
+        pub static OP_ASSIGN_TRAITS: &[LangItem] = &[$(LangItem::$assign,)*];
+
+        /// Converts `BinOpKind::Add` to `(LangItem::Add, LangItem::AddAssign)`, for example
+        pub fn binop_traits(kind: hir::BinOpKind) -> Option<(LangItem, LangItem)> {
+            match kind {
+                $(hir::BinOpKind::$name => Some((LangItem::$name, LangItem::$assign)),)*
+                _ => None,
+            }
+        }
+    };
+}
+
+op_utils! {
+    Add    AddAssign
+    Sub    SubAssign
+    Mul    MulAssign
+    Div    DivAssign
+    Rem    RemAssign
+    BitXor BitXorAssign
+    BitAnd BitAndAssign
+    BitOr  BitOrAssign
+    Shl    ShlAssign
+    Shr    ShrAssign
 }

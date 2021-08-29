@@ -89,13 +89,14 @@ unsafe fn configure_llvm(sess: &Session) {
             add("-generate-arange-section", false);
         }
 
-        // FIXME(nagisa): disable the machine outliner by default in LLVM versions 11, where it was
-        // introduced and up.
+        // Disable the machine outliner by default in LLVM versions 11 and LLVM
+        // version 12, where it leads to miscompilation.
         //
-        // This should remain in place until https://reviews.llvm.org/D103167 is fixed. If LLVM
-        // has been upgraded since, consider adjusting the version check below to contain an upper
-        // bound.
-        if llvm_util::get_version() >= (11, 0, 0) {
+        // Ref:
+        // - https://github.com/rust-lang/rust/issues/85351
+        // - https://reviews.llvm.org/D103167
+        let llvm_version = llvm_util::get_version();
+        if llvm_version >= (11, 0, 0) && llvm_version < (13, 0, 0) {
             add("-enable-machine-outliner=never", false);
         }
 
@@ -365,7 +366,7 @@ pub fn llvm_global_features(sess: &Session) -> Vec<String> {
 
                 features_string
             };
-            features.extend(features_string.split(",").map(String::from));
+            features.extend(features_string.split(',').map(String::from));
         }
         Some(_) | None => {}
     };
@@ -374,7 +375,7 @@ pub fn llvm_global_features(sess: &Session) -> Vec<String> {
         if s.is_empty() {
             return None;
         }
-        let feature = if s.starts_with("+") || s.starts_with("-") {
+        let feature = if s.starts_with('+') || s.starts_with('-') {
             &s[1..]
         } else {
             return Some(s.to_string());

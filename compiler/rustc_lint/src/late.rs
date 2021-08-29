@@ -244,6 +244,11 @@ impl<'tcx, T: LateLintPass<'tcx>> hir_visit::Visitor<'tcx> for LateContextAndPas
         hir_visit::walk_ty(self, t);
     }
 
+    fn visit_infer(&mut self, inf: &'tcx hir::InferArg) {
+        lint_callback!(self, check_infer, inf);
+        hir_visit::walk_inf(self, inf);
+    }
+
     fn visit_name(&mut self, sp: Span, name: Symbol) {
         lint_callback!(self, check_name, sp, name);
     }
@@ -448,10 +453,6 @@ fn late_lint_pass_crate<'tcx, T: LateLintPass<'tcx>>(tcx: TyCtxt<'tcx>, pass: T)
         lint_callback!(cx, check_crate, krate);
 
         hir_visit::walk_crate(cx, krate);
-        for attr in krate.non_exported_macro_attrs {
-            // This HIR ID is a lie, since the macro ID isn't available.
-            cx.visit_attribute(hir::CRATE_HIR_ID, attr);
-        }
 
         lint_callback!(cx, check_crate_post, krate);
     })

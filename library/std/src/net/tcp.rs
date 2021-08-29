@@ -546,6 +546,12 @@ impl TcpStream {
     }
 }
 
+// In addition to the `impl`s here, `TcpStream` also has `impl`s for
+// `AsFd`/`From<OwnedFd>`/`Into<OwnedFd>` and
+// `AsRawFd`/`IntoRawFd`/`FromRawFd`, on Unix and WASI, and
+// `AsSocket`/`From<OwnedSocket>`/`Into<OwnedSocket>` and
+// `AsRawSocket`/`IntoRawSocket`/`FromRawSocket` on Windows.
+
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Read for TcpStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -767,17 +773,24 @@ impl TcpListener {
     /// # Examples
     ///
     /// ```no_run
-    /// use std::net::TcpListener;
+    /// use std::net::{TcpListener, TcpStream};
     ///
-    /// let listener = TcpListener::bind("127.0.0.1:80").unwrap();
+    /// fn handle_connection(stream: TcpStream) {
+    ///    //...
+    /// }
     ///
-    /// for stream in listener.incoming() {
-    ///     match stream {
-    ///         Ok(stream) => {
-    ///             println!("new client!");
+    /// fn main() -> std::io::Result<()> {
+    ///     let listener = TcpListener::bind("127.0.0.1:80").unwrap();
+    ///
+    ///     for stream in listener.incoming() {
+    ///         match stream {
+    ///             Ok(stream) => {
+    ///                 handle_connection(stream);
+    ///             }
+    ///             Err(e) => { /* connection failed */ }
     ///         }
-    ///         Err(e) => { /* connection failed */ }
     ///     }
+    ///     Ok(())
     /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -907,6 +920,12 @@ impl TcpListener {
         self.0.set_nonblocking(nonblocking)
     }
 }
+
+// In addition to the `impl`s here, `TcpListener` also has `impl`s for
+// `AsFd`/`From<OwnedFd>`/`Into<OwnedFd>` and
+// `AsRawFd`/`IntoRawFd`/`FromRawFd`, on Unix and WASI, and
+// `AsSocket`/`From<OwnedSocket>`/`Into<OwnedSocket>` and
+// `AsRawSocket`/`IntoRawSocket`/`FromRawSocket` on Windows.
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<'a> Iterator for Incoming<'a> {

@@ -1179,13 +1179,10 @@ fn noop_visit_inline_asm<T: MutVisitor>(asm: &mut InlineAsm, vis: &mut T) {
     for (op, _) in &mut asm.operands {
         match op {
             InlineAsmOperand::In { expr, .. }
+            | InlineAsmOperand::Out { expr: Some(expr), .. }
             | InlineAsmOperand::InOut { expr, .. }
             | InlineAsmOperand::Sym { expr, .. } => vis.visit_expr(expr),
-            InlineAsmOperand::Out { expr, .. } => {
-                if let Some(expr) = expr {
-                    vis.visit_expr(expr);
-                }
-            }
+            InlineAsmOperand::Out { expr: None, .. } => {}
             InlineAsmOperand::SplitInOut { in_expr, out_expr, .. } => {
                 vis.visit_expr(in_expr);
                 if let Some(out_expr) = out_expr {
@@ -1237,7 +1234,7 @@ pub fn noop_visit_expr<T: MutVisitor>(
             vis.visit_ty(ty);
         }
         ExprKind::AddrOf(_, _, ohs) => vis.visit_expr(ohs),
-        ExprKind::Let(pat, scrutinee) => {
+        ExprKind::Let(pat, scrutinee, _) => {
             vis.visit_pat(pat);
             vis.visit_expr(scrutinee);
         }
@@ -1347,12 +1344,6 @@ pub fn noop_visit_expr<T: MutVisitor>(
         }
         ExprKind::Paren(expr) => {
             vis.visit_expr(expr);
-
-            // Nodes that are equal modulo `Paren` sugar no-ops should have the same IDs.
-            *id = expr.id;
-            vis.visit_span(span);
-            visit_thin_attrs(attrs, vis);
-            return;
         }
         ExprKind::Yield(expr) => {
             visit_opt(expr, |expr| vis.visit_expr(expr));

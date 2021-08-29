@@ -136,11 +136,11 @@ pub fn print_crate<'a>(
     s.s.eof()
 }
 
-// This makes printed token streams look slightly nicer,
-// and also addresses some specific regressions described in #63896 and #73345.
+/// This makes printed token streams look slightly nicer,
+/// and also addresses some specific regressions described in #63896 and #73345.
 fn tt_prepend_space(tt: &TokenTree, prev: &TokenTree) -> bool {
     if let TokenTree::Token(token) = prev {
-        if matches!(token.kind, token::Dot) {
+        if matches!(token.kind, token::Dot | token::Dollar) {
             return false;
         }
         if let token::DocComment(comment_kind, ..) = token.kind {
@@ -575,6 +575,33 @@ pub trait PrintState<'a>: std::ops::Deref<Target = pp::Printer> + std::ops::Dere
                 let token_str = self.token_kind_to_string(&token::CloseDelim(delim));
                 self.word(token_str)
             }
+        }
+    }
+
+    fn print_mac_def(
+        &mut self,
+        macro_def: &ast::MacroDef,
+        ident: &Ident,
+        sp: &Span,
+        print_visibility: impl FnOnce(&mut Self),
+    ) {
+        let (kw, has_bang) = if macro_def.macro_rules {
+            ("macro_rules", true)
+        } else {
+            print_visibility(self);
+            ("macro", false)
+        };
+        self.print_mac_common(
+            Some(MacHeader::Keyword(kw)),
+            has_bang,
+            Some(*ident),
+            macro_def.body.delim(),
+            &macro_def.body.inner_tokens(),
+            true,
+            *sp,
+        );
+        if macro_def.body.need_semicolon() {
+            self.word(";");
         }
     }
 
@@ -1305,24 +1332,9 @@ impl<'a> State<'a> {
                 }
             }
             ast::ItemKind::MacroDef(ref macro_def) => {
-                let (kw, has_bang) = if macro_def.macro_rules {
-                    ("macro_rules", true)
-                } else {
-                    self.print_visibility(&item.vis);
-                    ("macro", false)
-                };
-                self.print_mac_common(
-                    Some(MacHeader::Keyword(kw)),
-                    has_bang,
-                    Some(item.ident),
-                    macro_def.body.delim(),
-                    &macro_def.body.inner_tokens(),
-                    true,
-                    item.span,
-                );
-                if macro_def.body.need_semicolon() {
-                    self.word(";");
-                }
+                self.print_mac_def(macro_def, &item.ident, &item.span, |state| {
+                    state.print_visibility(&item.vis)
+                });
             }
         }
         self.ann.post(self, AnnNode::Item(item))
@@ -1587,19 +1599,14 @@ impl<'a> State<'a> {
         self.ann.post(self, AnnNode::Block(blk))
     }
 
-    /// Print a `let pat = scrutinee` expression.
-    crate fn print_let(&mut self, pat: &ast::Pat, scrutinee: &ast::Expr) {
+    /// Print a `let pat = expr` expression.
+    crate fn print_let(&mut self, pat: &ast::Pat, expr: &ast::Expr) {
         self.s.word("let ");
-
         self.print_pat(pat);
         self.s.space();
-
         self.word_space("=");
-        self.print_expr_cond_paren(
-            scrutinee,
-            Self::cond_needs_par(scrutinee)
-                || parser::needs_par_as_let_scrutinee(scrutinee.precedence().order()),
-        )
+        let npals = || parser::needs_par_as_let_scrutinee(expr.precedence().order());
+        self.print_expr_cond_paren(expr, Self::cond_needs_par(expr) || npals())
     }
 
     fn print_else(&mut self, els: Option<&ast::Expr>) {
@@ -1632,10 +1639,8 @@ impl<'a> State<'a> {
 
     crate fn print_if(&mut self, test: &ast::Expr, blk: &ast::Block, elseopt: Option<&ast::Expr>) {
         self.head("if");
-
         self.print_expr_as_cond(test);
         self.s.space();
-
         self.print_block(blk);
         self.print_else(elseopt)
     }
@@ -1668,13 +1673,13 @@ impl<'a> State<'a> {
         self.print_expr_cond_paren(expr, Self::cond_needs_par(expr))
     }
 
-    /// Does `expr` need parenthesis when printed in a condition position?
+    // Does `expr` need parenthesis when printed in a condition position?
+    //
+    // These cases need parens due to the parse error observed in #26461: `if return {}`
+    // parses as the erroneous construct `if (return {})`, not `if (return) {}`.
     fn cond_needs_par(expr: &ast::Expr) -> bool {
         match expr.kind {
-            // These cases need parens due to the parse error observed in #26461: `if return {}`
-            // parses as the erroneous construct `if (return {})`, not `if (return) {}`.
-            ast::ExprKind::Closure(..) | ast::ExprKind::Ret(..) | ast::ExprKind::Break(..) => true,
-
+            ast::ExprKind::Break(..) | ast::ExprKind::Closure(..) | ast::ExprKind::Ret(..) => true,
             _ => parser::contains_exterior_struct_lit(expr),
         }
     }
@@ -1919,7 +1924,7 @@ impl<'a> State<'a> {
                 self.word_space(":");
                 self.print_type(ty);
             }
-            ast::ExprKind::Let(ref pat, ref scrutinee) => {
+            ast::ExprKind::Let(ref pat, ref scrutinee, _) => {
                 self.print_let(pat, scrutinee);
             }
             ast::ExprKind::If(ref test, ref blk, ref elseopt) => {
@@ -1954,7 +1959,6 @@ impl<'a> State<'a> {
                     self.word_space(":");
                 }
                 self.head("loop");
-                self.s.space();
                 self.print_block_with_attrs(blk, attrs);
             }
             ast::ExprKind::Match(ref expr, ref arms) => {
@@ -2187,12 +2191,15 @@ impl<'a> State<'a> {
         enum AsmArg<'a> {
             Template(String),
             Operand(&'a InlineAsmOperand),
+            ClobberAbi(Symbol),
             Options(InlineAsmOptions),
         }
 
-        let mut args = vec![];
-        args.push(AsmArg::Template(InlineAsmTemplatePiece::to_string(&asm.template)));
+        let mut args = vec![AsmArg::Template(InlineAsmTemplatePiece::to_string(&asm.template))];
         args.extend(asm.operands.iter().map(|(o, _)| AsmArg::Operand(o)));
+        if let Some((abi, _)) = asm.clobber_abi {
+            args.push(AsmArg::ClobberAbi(abi));
+        }
         if !asm.options.is_empty() {
             args.push(AsmArg::Options(asm.options));
         }
@@ -2258,6 +2265,12 @@ impl<'a> State<'a> {
                         s.print_expr(expr);
                     }
                 }
+            }
+            AsmArg::ClobberAbi(abi) => {
+                s.word("clobber_abi");
+                s.popen();
+                s.print_symbol(*abi, ast::StrStyle::Cooked);
+                s.pclose();
             }
             AsmArg::Options(opts) => {
                 s.word("options");

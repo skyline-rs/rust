@@ -57,6 +57,9 @@ pub fn walk_expr<'a, 'tcx: 'a, V: Visitor<'a, 'tcx>>(visitor: &mut V, expr: &Exp
         Use { source } => visitor.visit_expr(&visitor.thir()[source]),
         NeverToAny { source } => visitor.visit_expr(&visitor.thir()[source]),
         Pointer { source, cast: _ } => visitor.visit_expr(&visitor.thir()[source]),
+        Let { expr, .. } => {
+            visitor.visit_expr(&visitor.thir()[expr]);
+        }
         Loop { body } => visitor.visit_expr(&visitor.thir()[body]),
         Match { scrutinee, ref arms } => {
             visitor.visit_expr(&visitor.thir()[scrutinee]);
@@ -153,8 +156,8 @@ pub fn walk_expr<'a, 'tcx: 'a, V: Visitor<'a, 'tcx>>(visitor: &mut V, expr: &Exp
 }
 
 pub fn walk_stmt<'a, 'tcx: 'a, V: Visitor<'a, 'tcx>>(visitor: &mut V, stmt: &Stmt<'tcx>) {
-    match stmt.kind {
-        StmtKind::Expr { expr, scope: _ } => visitor.visit_expr(&visitor.thir()[expr]),
+    match &stmt.kind {
+        StmtKind::Expr { expr, scope: _ } => visitor.visit_expr(&visitor.thir()[*expr]),
         StmtKind::Let {
             initializer,
             remainder_scope: _,
@@ -163,7 +166,7 @@ pub fn walk_stmt<'a, 'tcx: 'a, V: Visitor<'a, 'tcx>>(visitor: &mut V, stmt: &Stm
             lint_level: _,
         } => {
             if let Some(init) = initializer {
-                visitor.visit_expr(&visitor.thir()[init]);
+                visitor.visit_expr(&visitor.thir()[*init]);
             }
             visitor.visit_pat(pattern);
         }

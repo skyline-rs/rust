@@ -5,6 +5,7 @@ use crate::io::ErrorKind;
 pub use self::rand::hashmap_random_keys;
 pub use libc::strlen;
 
+#[cfg(not(target_os = "espidf"))]
 #[macro_use]
 pub mod weak;
 
@@ -30,6 +31,7 @@ pub mod net;
 #[cfg(target_os = "l4re")]
 pub use self::l4re::net;
 pub mod os;
+pub mod os_str;
 pub mod path;
 pub mod pipe;
 pub mod process;
@@ -42,8 +44,10 @@ pub mod thread_local_dtor;
 pub mod thread_local_key;
 pub mod time;
 
-pub use crate::sys_common::os_str_bytes as os_str;
+#[cfg(target_os = "espidf")]
+pub fn init(argc: isize, argv: *const *const u8) {}
 
+#[cfg(not(target_os = "espidf"))]
 // SAFETY: must be called only once during runtime initialization.
 // NOTE: this is not guaranteed to run, for example when Rust code is called externally.
 pub unsafe fn init(argc: isize, argv: *const *const u8) {
@@ -123,7 +127,6 @@ pub unsafe fn init(argc: isize, argv: *const *const u8) {
 // SAFETY: must be called only once during runtime cleanup.
 // NOTE: this is not guaranteed to run, for example when the program aborts.
 pub unsafe fn cleanup() {
-    args::cleanup();
     stack_overflow::cleanup();
 }
 
@@ -133,29 +136,51 @@ pub use crate::sys::android::signal;
 pub use libc::signal;
 
 pub fn decode_error_kind(errno: i32) -> ErrorKind {
+    use ErrorKind::*;
     match errno as libc::c_int {
-        libc::ECONNREFUSED => ErrorKind::ConnectionRefused,
-        libc::ECONNRESET => ErrorKind::ConnectionReset,
-        libc::EPERM | libc::EACCES => ErrorKind::PermissionDenied,
-        libc::EPIPE => ErrorKind::BrokenPipe,
-        libc::ENOTCONN => ErrorKind::NotConnected,
-        libc::ECONNABORTED => ErrorKind::ConnectionAborted,
-        libc::EADDRNOTAVAIL => ErrorKind::AddrNotAvailable,
-        libc::EADDRINUSE => ErrorKind::AddrInUse,
-        libc::ENOENT => ErrorKind::NotFound,
-        libc::EINTR => ErrorKind::Interrupted,
-        libc::EINVAL => ErrorKind::InvalidInput,
-        libc::ETIMEDOUT => ErrorKind::TimedOut,
-        libc::EEXIST => ErrorKind::AlreadyExists,
-        libc::ENOSYS => ErrorKind::Unsupported,
-        libc::ENOMEM => ErrorKind::OutOfMemory,
+        libc::E2BIG => ArgumentListTooLong,
+        libc::EADDRINUSE => AddrInUse,
+        libc::EADDRNOTAVAIL => AddrNotAvailable,
+        libc::EBUSY => ResourceBusy,
+        libc::ECONNABORTED => ConnectionAborted,
+        libc::ECONNREFUSED => ConnectionRefused,
+        libc::ECONNRESET => ConnectionReset,
+        libc::EDEADLK => Deadlock,
+        libc::EDQUOT => FilesystemQuotaExceeded,
+        libc::EEXIST => AlreadyExists,
+        libc::EFBIG => FileTooLarge,
+        libc::EHOSTUNREACH => HostUnreachable,
+        libc::EINTR => Interrupted,
+        libc::EINVAL => InvalidInput,
+        libc::EISDIR => IsADirectory,
+        libc::ELOOP => FilesystemLoop,
+        libc::ENOENT => NotFound,
+        libc::ENOMEM => OutOfMemory,
+        libc::ENOSPC => StorageFull,
+        libc::ENOSYS => Unsupported,
+        libc::EMLINK => TooManyLinks,
+        libc::ENAMETOOLONG => FilenameTooLong,
+        libc::ENETDOWN => NetworkDown,
+        libc::ENETUNREACH => NetworkUnreachable,
+        libc::ENOTCONN => NotConnected,
+        libc::ENOTDIR => NotADirectory,
+        libc::ENOTEMPTY => DirectoryNotEmpty,
+        libc::EPIPE => BrokenPipe,
+        libc::EROFS => ReadOnlyFilesystem,
+        libc::ESPIPE => NotSeekable,
+        libc::ESTALE => StaleNetworkFileHandle,
+        libc::ETIMEDOUT => TimedOut,
+        libc::ETXTBSY => ExecutableFileBusy,
+        libc::EXDEV => CrossesDevices,
+
+        libc::EACCES | libc::EPERM => PermissionDenied,
 
         // These two constants can have the same value on some systems,
         // but different values on others, so we can't use a match
         // clause
-        x if x == libc::EAGAIN || x == libc::EWOULDBLOCK => ErrorKind::WouldBlock,
+        x if x == libc::EAGAIN || x == libc::EWOULDBLOCK => WouldBlock,
 
-        _ => ErrorKind::Other,
+        _ => Uncategorized,
     }
 }
 
@@ -195,13 +220,41 @@ pub fn cvt_nz(error: libc::c_int) -> crate::io::Result<()> {
     if error == 0 { Ok(()) } else { Err(crate::io::Error::from_raw_os_error(error)) }
 }
 
-// On Unix-like platforms, libc::abort will unregister signal handlers
-// including the SIGABRT handler, preventing the abort from being blocked, and
-// fclose streams, with the side effect of flushing them so libc buffered
-// output will be printed.  Additionally the shell will generally print a more
-// understandable error message like "Abort trap" rather than "Illegal
-// instruction" that intrinsics::abort would cause, as intrinsics::abort is
-// implemented as an illegal instruction.
+// libc::abort() will run the SIGABRT handler.  That's fine because anyone who
+// installs a SIGABRT handler already has to expect it to run in Very Bad
+// situations (eg, malloc crashing).
+//
+// Current glibc's abort() function unblocks SIGABRT, raises SIGABRT, clears the
+// SIGABRT handler and raises it again, and then starts to get creative.
+//
+// See the public documentation for `intrinsics::abort()` and `process::abort()`
+// for further discussion.
+//
+// There is confusion about whether libc::abort() flushes stdio streams.
+// libc::abort() is required by ISO C 99 (7.14.1.1p5) to be async-signal-safe,
+// so flushing streams is at least extremely hard, if not entirely impossible.
+//
+// However, some versions of POSIX (eg IEEE Std 1003.1-2001) required abort to
+// do so.  In 1003.1-2004 this was fixed.
+//
+// glibc's implementation did the flush, unsafely, before glibc commit
+// 91e7cf982d01 `abort: Do not flush stdio streams [BZ #15436]' by Florian
+// Weimer.  According to glibc's NEWS:
+//
+//    The abort function terminates the process immediately, without flushing
+//    stdio streams.  Previous glibc versions used to flush streams, resulting
+//    in deadlocks and further data corruption.  This change also affects
+//    process aborts as the result of assertion failures.
+//
+// This is an accurate description of the problem.  The only solution for
+// program with nontrivial use of C stdio is a fixed libc - one which does not
+// try to flush in abort - since even libc-internal errors, and assertion
+// failures generated from C, will go via abort().
+//
+// On systems with old, buggy, libcs, the impact can be severe for a
+// multithreaded C program.  It is much less severe for Rust, because Rust
+// stdlib doesn't use libc stdio buffering.  In a typical Rust program, which
+// does not use C stdio, even a buggy libc::abort() is, in fact, safe.
 pub fn abort_internal() -> ! {
     unsafe { libc::abort() }
 }
@@ -254,5 +307,21 @@ cfg_if::cfg_if! {
         #[link(name = "zircon")]
         #[link(name = "fdio")]
         extern "C" {}
+    }
+}
+
+#[cfg(target_os = "espidf")]
+mod unsupported {
+    use crate::io;
+
+    pub fn unsupported<T>() -> io::Result<T> {
+        Err(unsupported_err())
+    }
+
+    pub fn unsupported_err() -> io::Error {
+        io::Error::new_const(
+            io::ErrorKind::Unsupported,
+            &"operation not supported on this platform",
+        )
     }
 }

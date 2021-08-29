@@ -3,6 +3,7 @@ mod box_vec;
 mod linked_list;
 mod option_option;
 mod rc_buffer;
+mod rc_mutex;
 mod redundant_allocation;
 mod type_complexity;
 mod utils;
@@ -19,16 +20,16 @@ use rustc_session::{declare_tool_lint, impl_lint_pass};
 use rustc_span::source_map::Span;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for use of `Box<Vec<_>>` anywhere in the code.
+    /// ### What it does
+    /// Checks for use of `Box<Vec<_>>` anywhere in the code.
     /// Check the [Box documentation](https://doc.rust-lang.org/std/boxed/index.html) for more information.
     ///
-    /// **Why is this bad?** `Vec` already keeps its contents in a separate area on
+    /// ### Why is this bad?
+    /// `Vec` already keeps its contents in a separate area on
     /// the heap. So if you `Box` it, you just add another level of indirection
     /// without any benefit whatsoever.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust,ignore
     /// struct X {
     ///     values: Box<Vec<Foo>>,
@@ -48,16 +49,19 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for use of `Vec<Box<T>>` where T: Sized anywhere in the code.
+    /// ### What it does
+    /// Checks for use of `Vec<Box<T>>` where T: Sized anywhere in the code.
     /// Check the [Box documentation](https://doc.rust-lang.org/std/boxed/index.html) for more information.
     ///
-    /// **Why is this bad?** `Vec` already keeps its contents in a separate area on
+    /// ### Why is this bad?
+    /// `Vec` already keeps its contents in a separate area on
     /// the heap. So if you `Box` its contents, you just add another level of indirection.
     ///
-    /// **Known problems:** Vec<Box<T: Sized>> makes sense if T is a large type (see [#3530](https://github.com/rust-lang/rust-clippy/issues/3530),
+    /// ### Known problems
+    /// Vec<Box<T: Sized>> makes sense if T is a large type (see [#3530](https://github.com/rust-lang/rust-clippy/issues/3530),
     /// 1st comment).
     ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// struct X {
     ///     values: Vec<Box<i32>>,
@@ -77,19 +81,19 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for use of `Option<Option<_>>` in function signatures and type
+    /// ### What it does
+    /// Checks for use of `Option<Option<_>>` in function signatures and type
     /// definitions
     ///
-    /// **Why is this bad?** `Option<_>` represents an optional value. `Option<Option<_>>`
+    /// ### Why is this bad?
+    /// `Option<_>` represents an optional value. `Option<Option<_>>`
     /// represents an optional optional value which is logically the same thing as an optional
     /// value but has an unneeded extra level of wrapping.
     ///
     /// If you have a case where `Some(Some(_))`, `Some(None)` and `None` are distinct cases,
     /// consider a custom `enum` instead, with clear names for each case.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example**
+    /// ### Example
     /// ```rust
     /// fn get_data() -> Option<Option<u32>> {
     ///     None
@@ -115,10 +119,12 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for usage of any `LinkedList`, suggesting to use a
+    /// ### What it does
+    /// Checks for usage of any `LinkedList`, suggesting to use a
     /// `Vec` or a `VecDeque` (formerly called `RingBuf`).
     ///
-    /// **Why is this bad?** Gankro says:
+    /// ### Why is this bad?
+    /// Gankro says:
     ///
     /// > The TL;DR of `LinkedList` is that it's built on a massive amount of
     /// pointers and indirection.
@@ -137,10 +143,11 @@ declare_clippy_lint! {
     /// can still be better
     /// > because of how expensive it is to seek to the middle of a `LinkedList`.
     ///
-    /// **Known problems:** False positives – the instances where using a
+    /// ### Known problems
+    /// False positives – the instances where using a
     /// `LinkedList` makes sense are few and far between, but they can still happen.
     ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// # use std::collections::LinkedList;
     /// let x: LinkedList<usize> = LinkedList::new();
@@ -151,15 +158,15 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for use of `&Box<T>` anywhere in the code.
+    /// ### What it does
+    /// Checks for use of `&Box<T>` anywhere in the code.
     /// Check the [Box documentation](https://doc.rust-lang.org/std/boxed/index.html) for more information.
     ///
-    /// **Why is this bad?** Any `&Box<T>` can also be a `&T`, which is more
+    /// ### Why is this bad?
+    /// Any `&Box<T>` can also be a `&T`, which is more
     /// general.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust,ignore
     /// fn foo(bar: &Box<T>) { ... }
     /// ```
@@ -175,14 +182,14 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for use of redundant allocations anywhere in the code.
+    /// ### What it does
+    /// Checks for use of redundant allocations anywhere in the code.
     ///
-    /// **Why is this bad?** Expressions such as `Rc<&T>`, `Rc<Rc<T>>`, `Rc<Box<T>>`, `Box<&T>`
-    /// add an unnecessary level of indirection.
+    /// ### Why is this bad?
+    /// Expressions such as `Rc<&T>`, `Rc<Rc<T>>`, `Rc<Arc<T>>`, `Rc<Box<T>>`, `Arc<&T>`, `Arc<Rc<T>>`,
+    /// `Arc<Arc<T>>`, `Arc<Box<T>>`, `Box<&T>`, `Box<Rc<T>>`, `Box<Arc<T>>`, `Box<Box<T>>`, add an unnecessary level of indirection.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// # use std::rc::Rc;
     /// fn foo(bar: Rc<&usize>) {}
@@ -199,9 +206,11 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for `Rc<T>` and `Arc<T>` when `T` is a mutable buffer type such as `String` or `Vec`.
+    /// ### What it does
+    /// Checks for `Rc<T>` and `Arc<T>` when `T` is a mutable buffer type such as `String` or `Vec`.
     ///
-    /// **Why is this bad?** Expressions such as `Rc<String>` usually have no advantage over `Rc<str>`, since
+    /// ### Why is this bad?
+    /// Expressions such as `Rc<String>` usually have no advantage over `Rc<str>`, since
     /// it is larger and involves an extra level of indirection, and doesn't implement `Borrow<str>`.
     ///
     /// While mutating a buffer type would still be possible with `Rc::get_mut()`, it only
@@ -210,10 +219,11 @@ declare_clippy_lint! {
     /// type with an interior mutable container (such as `RefCell` or `Mutex`) would normally
     /// be used.
     ///
-    /// **Known problems:** This pattern can be desirable to avoid the overhead of a `RefCell` or `Mutex` for
+    /// ### Known problems
+    /// This pattern can be desirable to avoid the overhead of a `RefCell` or `Mutex` for
     /// cases where mutation only happens before there are any additional references.
     ///
-    /// **Example:**
+    /// ### Example
     /// ```rust,ignore
     /// # use std::rc::Rc;
     /// fn foo(interned: Rc<String>) { ... }
@@ -230,15 +240,15 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for types used in structs, parameters and `let`
+    /// ### What it does
+    /// Checks for types used in structs, parameters and `let`
     /// declarations above a certain complexity threshold.
     ///
-    /// **Why is this bad?** Too complex types make the code less readable. Consider
+    /// ### Why is this bad?
+    /// Too complex types make the code less readable. Consider
     /// using a `type` definition to simplify them.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// # use std::rc::Rc;
     /// struct Foo {
@@ -250,12 +260,44 @@ declare_clippy_lint! {
     "usage of very complex types that might be better factored into `type` definitions"
 }
 
+declare_clippy_lint! {
+    /// ### What it does
+    /// Checks for `Rc<Mutex<T>>`.
+    ///
+    /// ### Why is this bad?
+    /// `Rc` is used in single thread and `Mutex` is used in multi thread.
+    /// Consider using `Rc<RefCell<T>>` in single thread or `Arc<Mutex<T>>` in multi thread.
+    ///
+    /// ### Known problems
+    /// Sometimes combining generic types can lead to the requirement that a
+    /// type use Rc in conjunction with Mutex. We must consider those cases false positives, but
+    /// alas they are quite hard to rule out. Luckily they are also rare.
+    ///
+    /// ### Example
+    /// ```rust,ignore
+    /// use std::rc::Rc;
+    /// use std::sync::Mutex;
+    /// fn foo(interned: Rc<Mutex<i32>>) { ... }
+    /// ```
+    ///
+    /// Better:
+    ///
+    /// ```rust,ignore
+    /// use std::rc::Rc;
+    /// use std::cell::RefCell
+    /// fn foo(interned: Rc<RefCell<i32>>) { ... }
+    /// ```
+    pub RC_MUTEX,
+    restriction,
+    "usage of `Rc<Mutex<T>>`"
+}
+
 pub struct Types {
     vec_box_size_threshold: u64,
     type_complexity_threshold: u64,
 }
 
-impl_lint_pass!(Types => [BOX_VEC, VEC_BOX, OPTION_OPTION, LINKEDLIST, BORROWED_BOX, REDUNDANT_ALLOCATION, RC_BUFFER, TYPE_COMPLEXITY]);
+impl_lint_pass!(Types => [BOX_VEC, VEC_BOX, OPTION_OPTION, LINKEDLIST, BORROWED_BOX, REDUNDANT_ALLOCATION, RC_BUFFER, RC_MUTEX, TYPE_COMPLEXITY]);
 
 impl<'tcx> LateLintPass<'tcx> for Types {
     fn check_fn(&mut self, cx: &LateContext<'_>, _: FnKind<'_>, decl: &FnDecl<'_>, _: &Body<'_>, _: Span, id: HirId) {
@@ -375,6 +417,7 @@ impl Types {
                     triggered |= vec_box::check(cx, hir_ty, qpath, def_id, self.vec_box_size_threshold);
                     triggered |= option_option::check(cx, hir_ty, qpath, def_id);
                     triggered |= linked_list::check(cx, hir_ty, def_id);
+                    triggered |= rc_mutex::check(cx, hir_ty, qpath, def_id);
 
                     if triggered {
                         return;

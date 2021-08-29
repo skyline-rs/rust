@@ -69,8 +69,6 @@ COPY host-x86_64/dist-x86_64-linux/build-gcc.sh /tmp/
 RUN ./build-gcc.sh && apt-get remove -y gcc g++
 
 COPY host-x86_64/dist-x86_64-linux/build-python.sh /tmp/
-# Build Python 2.7 needed for Clang 10.
-RUN ./build-python.sh 2.7.12
 # Build Python 3 needed for LLVM 12.
 RUN ./build-python.sh 3.9.1
 
@@ -83,6 +81,12 @@ RUN ./build-cmake.sh
 COPY host-x86_64/dist-x86_64-linux/build-clang.sh /tmp/
 RUN ./build-clang.sh
 ENV CC=clang CXX=clang++
+
+ENV PERF_COMMIT 1e19fc4c6168d2f7596e512f42f358f245d8f09d
+RUN curl -LS -o perf.zip https://github.com/rust-lang/rustc-perf/archive/$PERF_COMMIT.zip && \
+    unzip perf.zip && \
+    mv rustc-perf-$PERF_COMMIT rustc-perf && \
+    rm perf.zip
 
 COPY scripts/sccache.sh /scripts/
 RUN sh /scripts/sccache.sh
@@ -102,7 +106,7 @@ ENV RUST_CONFIGURE_ARGS \
       --set llvm.thin-lto=true \
       --set llvm.ninja=false \
       --set rust.jemalloc
-ENV SCRIPT ../src/ci/pgo.sh python2.7 ../x.py dist \
+ENV SCRIPT ../src/ci/pgo.sh python3 ../x.py dist \
     --host $HOSTS --target $HOSTS \
     --include-default-paths \
     src/tools/build-manifest

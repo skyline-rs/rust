@@ -19,7 +19,7 @@ use rustc_span::def_id::CRATE_DEF_INDEX;
 use rustc_target::spec::abi::Abi;
 
 use crate::clean::{
-    self, utils::find_nearest_parent_module, ExternalCrate, FakeDefId, GetDefId, PrimitiveType,
+    self, utils::find_nearest_parent_module, ExternalCrate, GetDefId, ItemId, PrimitiveType,
 };
 use crate::formats::item_type::ItemType;
 use crate::html::escape::Escape;
@@ -387,7 +387,7 @@ impl clean::GenericBound {
                 let modifier_str = match modifier {
                     hir::TraitBoundModifier::None => "",
                     hir::TraitBoundModifier::Maybe => "?",
-                    hir::TraitBoundModifier::MaybeConst => "?const",
+                    hir::TraitBoundModifier::MaybeConst => "~const",
                 };
                 if f.alternate() {
                     write!(f, "{}{:#}", modifier_str, ty.print(cx))
@@ -472,41 +472,68 @@ impl clean::GenericArgs {
     }
 }
 
-crate fn href(did: DefId, cx: &Context<'_>) -> Option<(String, ItemType, Vec<String>)> {
+// Possible errors when computing href link source for a `DefId`
+crate enum HrefError {
+    /// This item is known to rustdoc, but from a crate that does not have documentation generated.
+    ///
+    /// This can only happen for non-local items.
+    DocumentationNotBuilt,
+    /// This can only happen for non-local items when `--document-private-items` is not passed.
+    Private,
+    // Not in external cache, href link should be in same page
+    NotInExternalCache,
+}
+
+crate fn href_with_root_path(
+    did: DefId,
+    cx: &Context<'_>,
+    root_path: Option<&str>,
+) -> Result<(String, ItemType, Vec<String>), HrefError> {
     let cache = &cx.cache();
     let relative_to = &cx.current;
     fn to_module_fqp(shortty: ItemType, fqp: &[String]) -> &[String] {
-        if shortty == ItemType::Module { &fqp[..] } else { &fqp[..fqp.len() - 1] }
+        if shortty == ItemType::Module { fqp } else { &fqp[..fqp.len() - 1] }
     }
 
     if !did.is_local() && !cache.access_levels.is_public(did) && !cache.document_private {
-        return None;
+        return Err(HrefError::Private);
     }
 
+    let mut is_remote = false;
     let (fqp, shortty, mut url_parts) = match cache.paths.get(&did) {
         Some(&(ref fqp, shortty)) => (fqp, shortty, {
             let module_fqp = to_module_fqp(shortty, fqp);
             href_relative_parts(module_fqp, relative_to)
         }),
         None => {
-            let &(ref fqp, shortty) = cache.external_paths.get(&did)?;
-            let module_fqp = to_module_fqp(shortty, fqp);
-            (
-                fqp,
-                shortty,
-                match cache.extern_locations[&did.krate] {
-                    ExternalLocation::Remote(ref s) => {
-                        let s = s.trim_end_matches('/');
-                        let mut s = vec![&s[..]];
-                        s.extend(module_fqp[..].iter().map(String::as_str));
-                        s
-                    }
-                    ExternalLocation::Local => href_relative_parts(module_fqp, relative_to),
-                    ExternalLocation::Unknown => return None,
-                },
-            )
+            if let Some(&(ref fqp, shortty)) = cache.external_paths.get(&did) {
+                let module_fqp = to_module_fqp(shortty, fqp);
+                (
+                    fqp,
+                    shortty,
+                    match cache.extern_locations[&did.krate] {
+                        ExternalLocation::Remote(ref s) => {
+                            is_remote = true;
+                            let s = s.trim_end_matches('/');
+                            let mut s = vec![s];
+                            s.extend(module_fqp[..].iter().map(String::as_str));
+                            s
+                        }
+                        ExternalLocation::Local => href_relative_parts(module_fqp, relative_to),
+                        ExternalLocation::Unknown => return Err(HrefError::DocumentationNotBuilt),
+                    },
+                )
+            } else {
+                return Err(HrefError::NotInExternalCache);
+            }
         }
     };
+    if !is_remote {
+        if let Some(root_path) = root_path {
+            let root = root_path.trim_end_matches('/');
+            url_parts.insert(0, root);
+        }
+    }
     let last = &fqp.last().unwrap()[..];
     let filename;
     match shortty {
@@ -518,7 +545,11 @@ crate fn href(did: DefId, cx: &Context<'_>) -> Option<(String, ItemType, Vec<Str
             url_parts.push(&filename);
         }
     }
-    Some((url_parts.join("/"), shortty, fqp.to_vec()))
+    Ok((url_parts.join("/"), shortty, fqp.to_vec()))
+}
+
+crate fn href(did: DefId, cx: &Context<'_>) -> Result<(String, ItemType, Vec<String>), HrefError> {
+    href_with_root_path(did, cx, None)
 }
 
 /// Both paths should only be modules.
@@ -567,7 +598,7 @@ fn resolved_path<'a, 'cx: 'a>(
         write!(w, "{}{:#}", &last.name, last.args.print(cx))?;
     } else {
         let path = if use_absolute {
-            if let Some((_, _, fqp)) = href(did, cx) {
+            if let Ok((_, _, fqp)) = href(did, cx) {
                 format!(
                     "{}::{}",
                     fqp[..fqp.len() - 1].join("::"),
@@ -673,9 +704,9 @@ crate fn anchor<'a, 'cx: 'a>(
     text: &'a str,
     cx: &'cx Context<'_>,
 ) -> impl fmt::Display + 'a {
-    let parts = href(did.into(), cx);
+    let parts = href(did, cx);
     display_fn(move |f| {
-        if let Some((url, short_ty, fqp)) = parts {
+        if let Ok((url, short_ty, fqp)) = parts {
             write!(
                 f,
                 r#"<a class="{}" href="{}" title="{} {}">{}</a>"#,
@@ -906,8 +937,8 @@ fn fmt_type<'cx>(
                 //        everything comes in as a fully resolved QPath (hard to
                 //        look at).
                 box clean::ResolvedPath { did, .. } => {
-                    match href(did.into(), cx) {
-                        Some((ref url, _, ref path)) if !f.alternate() => {
+                    match href(did, cx) {
+                        Ok((ref url, _, ref path)) if !f.alternate() => {
                             write!(
                                 f,
                                 "<a class=\"type\" href=\"{url}#{shortty}.{name}\" \
@@ -1181,7 +1212,7 @@ impl clean::FnDecl {
 impl clean::Visibility {
     crate fn print_with_space<'a, 'tcx: 'a>(
         self,
-        item_did: FakeDefId,
+        item_did: ItemId,
         cx: &'a Context<'tcx>,
     ) -> impl fmt::Display + 'a + Captures<'tcx> {
         let to_print = match self {
@@ -1191,7 +1222,7 @@ impl clean::Visibility {
                 // FIXME(camelid): This may not work correctly if `item_did` is a module.
                 //                 However, rustdoc currently never displays a module's
                 //                 visibility, so it shouldn't matter.
-                let parent_module = find_nearest_parent_module(cx.tcx(), item_did.expect_real());
+                let parent_module = find_nearest_parent_module(cx.tcx(), item_did.expect_def_id());
 
                 if vis_did.index == CRATE_DEF_INDEX {
                     "pub(crate) ".to_owned()
@@ -1409,6 +1440,7 @@ impl clean::GenericArg {
             clean::GenericArg::Lifetime(lt) => fmt::Display::fmt(&lt.print(), f),
             clean::GenericArg::Type(ty) => fmt::Display::fmt(&ty.print(cx), f),
             clean::GenericArg::Const(ct) => fmt::Display::fmt(&ct.print(cx.tcx()), f),
+            clean::GenericArg::Infer => fmt::Display::fmt("_", f),
         })
     }
 }

@@ -4,9 +4,7 @@ use crate::native_libs;
 use crate::rmeta::encoder;
 
 use rustc_ast as ast;
-use rustc_ast::expand::allocator::AllocatorKind;
 use rustc_data_structures::stable_map::FxHashMap;
-use rustc_data_structures::svh::Svh;
 use rustc_hir as hir;
 use rustc_hir::def::{CtorKind, DefKind};
 use rustc_hir::def_id::{CrateNum, DefId, DefIdMap, CRATE_DEF_INDEX, LOCAL_CRATE};
@@ -19,12 +17,12 @@ use rustc_middle::middle::stability::DeprecationEntry;
 use rustc_middle::ty::query::Providers;
 use rustc_middle::ty::{self, TyCtxt, Visibility};
 use rustc_session::utils::NativeLibKind;
-use rustc_session::{CrateDisambiguator, Session};
+use rustc_session::{Session, StableCrateId};
+use rustc_span::hygiene::{ExpnHash, ExpnId};
 use rustc_span::source_map::{Span, Spanned};
 use rustc_span::symbol::Symbol;
 
 use rustc_data_structures::sync::Lrc;
-use rustc_span::ExpnId;
 use smallvec::SmallVec;
 use std::any::Any;
 
@@ -169,6 +167,7 @@ provide! { <'tcx> tcx, def_id, other, cdata,
     is_no_builtins => { cdata.root.no_builtins }
     symbol_mangling_version => { cdata.root.symbol_mangling_version }
     impl_defaultness => { cdata.get_impl_defaultness(def_id.index) }
+    impl_constness => { cdata.get_impl_constness(def_id.index) }
     reachable_non_generics => {
         let reachable_non_generics = tcx
             .exported_symbols(cdata.cnum)
@@ -186,7 +185,6 @@ provide! { <'tcx> tcx, def_id, other, cdata,
     }
     native_libraries => { Lrc::new(cdata.get_native_libraries(tcx.sess)) }
     foreign_modules => { cdata.get_foreign_modules(tcx) }
-    crate_disambiguator => { cdata.root.disambiguator }
     crate_hash => { cdata.root.hash }
     crate_host_hash => { cdata.host_hash }
     crate_name => { cdata.root.name }
@@ -242,6 +240,7 @@ pub fn provide(providers: &mut Providers) {
     // therefore no actual inputs, they're just reading tables calculated in
     // resolve! Does this work? Unsure! That's what the issue is about
     *providers = Providers {
+        allocator_kind: |tcx, ()| CStore::from_tcx(tcx).allocator_kind(),
         is_dllimport_foreign_item: |tcx, id| match tcx.native_library_kind(id) {
             Some(
                 NativeLibKind::Dylib { .. } | NativeLibKind::RawDylib | NativeLibKind::Unspecified,
@@ -312,7 +311,7 @@ pub fn provide(providers: &mut Providers) {
             // which is to say, its not deterministic in general. But
             // we believe that libstd is consistently assigned crate
             // num 1, so it should be enough to resolve #46112.
-            let mut crates: Vec<CrateNum> = (*tcx.crates()).to_owned();
+            let mut crates: Vec<CrateNum> = (*tcx.crates(())).to_owned();
             crates.sort();
 
             for &cnum in crates.iter() {
@@ -369,6 +368,7 @@ pub fn provide(providers: &mut Providers) {
             tcx.arena
                 .alloc_slice(&CStore::from_tcx(tcx).crate_dependencies_in_postorder(LOCAL_CRATE))
         },
+        crates: |tcx, ()| tcx.arena.alloc_slice(&CStore::from_tcx(tcx).crates_untracked()),
 
         ..*providers
     };
@@ -412,7 +412,7 @@ impl CStore {
 
         let data = self.get_crate_data(id.krate);
         if data.root.is_proc_macro_crate() {
-            return LoadedMacro::ProcMacro(data.load_proc_macro(id, sess));
+            return LoadedMacro::ProcMacro(data.load_proc_macro(id.index, sess));
         }
 
         let span = data.get_span(id.index, sess);
@@ -451,6 +451,16 @@ impl CStore {
         self.get_crate_data(def_id.krate).get_span(def_id.index, sess)
     }
 
+    pub fn def_kind(&self, def: DefId) -> DefKind {
+        self.get_crate_data(def.krate).def_kind(def.index)
+    }
+
+    pub fn crates_untracked(&self) -> Vec<CrateNum> {
+        let mut result = vec![];
+        self.iter_crate_data(|cnum, _| result.push(cnum));
+        result
+    }
+
     pub fn item_generics_num_lifetimes(&self, def_id: DefId, sess: &Session) -> usize {
         self.get_crate_data(def_id.krate).get_generics(def_id.index, sess).own_counts().lifetimes
     }
@@ -485,16 +495,12 @@ impl CrateStore for CStore {
         self
     }
 
-    fn crate_name_untracked(&self, cnum: CrateNum) -> Symbol {
+    fn crate_name(&self, cnum: CrateNum) -> Symbol {
         self.get_crate_data(cnum).root.name
     }
 
-    fn crate_disambiguator_untracked(&self, cnum: CrateNum) -> CrateDisambiguator {
-        self.get_crate_data(cnum).root.disambiguator
-    }
-
-    fn crate_hash_untracked(&self, cnum: CrateNum) -> Svh {
-        self.get_crate_data(cnum).root.hash
+    fn stable_crate_id(&self, cnum: CrateNum) -> StableCrateId {
+        self.get_crate_data(cnum).root.stable_crate_id
     }
 
     /// Returns the `DefKey` for a given `DefId`. This indicates the
@@ -502,10 +508,6 @@ impl CrateStore for CStore {
     /// `DefId` refers to.
     fn def_key(&self, def: DefId) -> DefKey {
         self.get_crate_data(def.krate).def_key(def.index)
-    }
-
-    fn def_kind(&self, def: DefId) -> DefKind {
-        self.get_crate_data(def.krate).def_kind(def.index)
     }
 
     fn def_path(&self, def: DefId) -> DefPath {
@@ -526,17 +528,11 @@ impl CrateStore for CStore {
         self.get_crate_data(cnum).def_path_hash_to_def_id(cnum, index_guess, hash)
     }
 
-    fn crates_untracked(&self) -> Vec<CrateNum> {
-        let mut result = vec![];
-        self.iter_crate_data(|cnum, _| result.push(cnum));
-        result
+    fn expn_hash_to_expn_id(&self, cnum: CrateNum, index_guess: u32, hash: ExpnHash) -> ExpnId {
+        self.get_crate_data(cnum).expn_hash_to_expn_id(index_guess, hash)
     }
 
     fn encode_metadata(&self, tcx: TyCtxt<'_>) -> EncodedMetadata {
         encoder::encode_metadata(tcx)
-    }
-
-    fn allocator_kind(&self) -> Option<AllocatorKind> {
-        self.allocator_kind()
     }
 }

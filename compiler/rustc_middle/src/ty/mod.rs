@@ -16,8 +16,8 @@ pub use self::IntVarValue::*;
 pub use self::Variance::*;
 pub use adt::*;
 pub use assoc::*;
-pub use closure::*;
 pub use generics::*;
+pub use vtable::*;
 
 use crate::hir::exports::ExportMap;
 use crate::ich::StableHashingContext;
@@ -37,7 +37,7 @@ use rustc_data_structures::tagged_ptr::CopyTaggedPtr;
 use rustc_hir as hir;
 use rustc_hir::def::{CtorKind, CtorOf, DefKind, Res};
 use rustc_hir::def_id::{CrateNum, DefId, LocalDefId, LocalDefIdMap, CRATE_DEF_INDEX};
-use rustc_hir::{Constness, Node};
+use rustc_hir::Node;
 use rustc_macros::HashStable;
 use rustc_span::symbol::{kw, Ident, Symbol};
 use rustc_span::Span;
@@ -54,11 +54,17 @@ pub use rustc_type_ir::*;
 
 pub use self::binding::BindingMode;
 pub use self::binding::BindingMode::*;
+pub use self::closure::{
+    is_ancestor_or_same_capture, place_to_string_for_capture, BorrowKind, CaptureInfo,
+    CapturedPlace, ClosureKind, MinCaptureInformationMap, MinCaptureList,
+    RootVariableMinCaptureList, UpvarBorrow, UpvarCapture, UpvarCaptureMap, UpvarId, UpvarListMap,
+    UpvarPath, CAPTURE_STRUCT_LOCAL,
+};
 pub use self::consts::{Const, ConstInt, ConstKind, InferConst, ScalarInt, Unevaluated, ValTree};
 pub use self::context::{
     tls, CanonicalUserType, CanonicalUserTypeAnnotation, CanonicalUserTypeAnnotations,
     CtxtInterners, DelaySpanBugEmitted, FreeRegionInfo, GeneratorInteriorTypeCause, GlobalCtxt,
-    Lift, TyCtxt, TypeckResults, UserType, UserTypeAnnotationIndex,
+    Lift, OnDiskCache, TyCtxt, TypeckResults, UserType, UserTypeAnnotationIndex,
 };
 pub use self::instance::{Instance, InstanceDef};
 pub use self::list::List;
@@ -94,6 +100,7 @@ pub mod relate;
 pub mod subst;
 pub mod trait_def;
 pub mod util;
+pub mod vtable;
 pub mod walk;
 
 mod adt;
@@ -111,6 +118,7 @@ mod sty;
 
 // Data types
 
+#[derive(Debug)]
 pub struct ResolverOutputs {
     pub definitions: rustc_hir::definitions::Definitions,
     pub cstore: Box<CrateStoreDyn>,
@@ -126,7 +134,7 @@ pub struct ResolverOutputs {
     pub main_def: Option<MainDefinition>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct MainDefinition {
     pub res: Res<ast::NodeId>,
     pub is_import: bool,
@@ -171,6 +179,44 @@ pub enum Visibility {
     Restricted(DefId),
     /// Not visible anywhere in the local crate. This is the visibility of private external items.
     Invisible,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, HashStable, TyEncodable, TyDecodable)]
+pub enum BoundConstness {
+    /// `T: Trait`
+    NotConst,
+    /// `T: ~const Trait`
+    ///
+    /// Requires resolving to const only when we are in a const context.
+    ConstIfConst,
+}
+
+impl fmt::Display for BoundConstness {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotConst => f.write_str("normal"),
+            Self::ConstIfConst => f.write_str("`~const`"),
+        }
+    }
+}
+
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Copy,
+    Hash,
+    TyEncodable,
+    TyDecodable,
+    HashStable,
+    TypeFoldable
+)]
+pub struct ClosureSizeProfileData<'tcx> {
+    /// Tuple containing the types of closure captures before the feature `capture_disjoint_fields`
+    pub before_feature_tys: Ty<'tcx>,
+    /// Tuple containing the types of closure captures after the feature `capture_disjoint_fields`
+    pub after_feature_tys: Ty<'tcx>,
 }
 
 pub trait DefIdTree: Copy {
@@ -430,11 +476,7 @@ pub enum PredicateKind<'tcx> {
     /// Corresponds to `where Foo: Bar<A, B, C>`. `Foo` here would be
     /// the `Self` type of the trait reference and `A`, `B`, and `C`
     /// would be the type parameters.
-    ///
-    /// A trait predicate will have `Constness::Const` if it originates
-    /// from a bound on a `const fn` without the `?const` opt-out (e.g.,
-    /// `const fn foobar<Foo: Bar>() {}`).
-    Trait(TraitPredicate<'tcx>, Constness),
+    Trait(TraitPredicate<'tcx>),
 
     /// `where 'a: 'b`
     RegionOutlives(RegionOutlivesPredicate<'tcx>),
@@ -458,10 +500,24 @@ pub enum PredicateKind<'tcx> {
     ClosureKind(DefId, SubstsRef<'tcx>, ClosureKind),
 
     /// `T1 <: T2`
+    ///
+    /// This obligation is created most often when we have two
+    /// unresolved type variables and hence don't have enough
+    /// information to process the subtyping obligation yet.
     Subtype(SubtypePredicate<'tcx>),
 
+    /// `T1` coerced to `T2`
+    ///
+    /// Like a subtyping obligation, this is created most often
+    /// when we have two unresolved type variables and hence
+    /// don't have enough information to process the coercion
+    /// obligation yet. At the moment, we actually process coercions
+    /// very much like subtyping and don't handle the full coercion
+    /// logic.
+    Coerce(CoercePredicate<'tcx>),
+
     /// Constant initializer must evaluate successfully.
-    ConstEvaluatable(ty::WithOptConstParam<DefId>, SubstsRef<'tcx>),
+    ConstEvaluatable(ty::Unevaluated<'tcx, ()>),
 
     /// Constants must be equal. The first component is the const that is expected.
     ConstEquate(&'tcx Const<'tcx>, &'tcx Const<'tcx>),
@@ -590,6 +646,8 @@ impl<'tcx> Predicate<'tcx> {
 #[derive(HashStable, TypeFoldable)]
 pub struct TraitPredicate<'tcx> {
     pub trait_ref: TraitRef<'tcx>,
+
+    pub constness: BoundConstness,
 }
 
 pub type PolyTraitPredicate<'tcx> = ty::Binder<'tcx, TraitPredicate<'tcx>>;
@@ -623,6 +681,9 @@ pub type TypeOutlivesPredicate<'tcx> = OutlivesPredicate<Ty<'tcx>, ty::Region<'t
 pub type PolyRegionOutlivesPredicate<'tcx> = ty::Binder<'tcx, RegionOutlivesPredicate<'tcx>>;
 pub type PolyTypeOutlivesPredicate<'tcx> = ty::Binder<'tcx, TypeOutlivesPredicate<'tcx>>;
 
+/// Encodes that `a` must be a subtype of `b`. The `a_is_expected` flag indicates
+/// whether the `a` type is the type that we should label as "expected" when
+/// presenting user diagnostics.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, TyEncodable, TyDecodable)]
 #[derive(HashStable, TypeFoldable)]
 pub struct SubtypePredicate<'tcx> {
@@ -631,6 +692,15 @@ pub struct SubtypePredicate<'tcx> {
     pub b: Ty<'tcx>,
 }
 pub type PolySubtypePredicate<'tcx> = ty::Binder<'tcx, SubtypePredicate<'tcx>>;
+
+/// Encodes that we have to coerce *from* the `a` type to the `b` type.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, TyEncodable, TyDecodable)]
+#[derive(HashStable, TypeFoldable)]
+pub struct CoercePredicate<'tcx> {
+    pub a: Ty<'tcx>,
+    pub b: Ty<'tcx>,
+}
+pub type PolyCoercePredicate<'tcx> = ty::Binder<'tcx, CoercePredicate<'tcx>>;
 
 /// This kind of predicate has no *direct* correspondent in the
 /// syntax, but it roughly corresponds to the syntactic forms:
@@ -723,8 +793,11 @@ impl ToPredicate<'tcx> for PredicateKind<'tcx> {
 
 impl<'tcx> ToPredicate<'tcx> for ConstnessAnd<TraitRef<'tcx>> {
     fn to_predicate(self, tcx: TyCtxt<'tcx>) -> Predicate<'tcx> {
-        PredicateKind::Trait(ty::TraitPredicate { trait_ref: self.value }, self.constness)
-            .to_predicate(tcx)
+        PredicateKind::Trait(ty::TraitPredicate {
+            trait_ref: self.value,
+            constness: self.constness,
+        })
+        .to_predicate(tcx)
     }
 }
 
@@ -732,15 +805,15 @@ impl<'tcx> ToPredicate<'tcx> for ConstnessAnd<PolyTraitRef<'tcx>> {
     fn to_predicate(self, tcx: TyCtxt<'tcx>) -> Predicate<'tcx> {
         self.value
             .map_bound(|trait_ref| {
-                PredicateKind::Trait(ty::TraitPredicate { trait_ref }, self.constness)
+                PredicateKind::Trait(ty::TraitPredicate { trait_ref, constness: self.constness })
             })
             .to_predicate(tcx)
     }
 }
 
-impl<'tcx> ToPredicate<'tcx> for ConstnessAnd<PolyTraitPredicate<'tcx>> {
+impl<'tcx> ToPredicate<'tcx> for PolyTraitPredicate<'tcx> {
     fn to_predicate(self, tcx: TyCtxt<'tcx>) -> Predicate<'tcx> {
-        self.value.map_bound(|value| PredicateKind::Trait(value, self.constness)).to_predicate(tcx)
+        self.map_bound(PredicateKind::Trait).to_predicate(tcx)
     }
 }
 
@@ -766,11 +839,12 @@ impl<'tcx> Predicate<'tcx> {
     pub fn to_opt_poly_trait_ref(self) -> Option<ConstnessAnd<PolyTraitRef<'tcx>>> {
         let predicate = self.kind();
         match predicate.skip_binder() {
-            PredicateKind::Trait(t, constness) => {
-                Some(ConstnessAnd { constness, value: predicate.rebind(t.trait_ref) })
+            PredicateKind::Trait(t) => {
+                Some(ConstnessAnd { constness: t.constness, value: predicate.rebind(t.trait_ref) })
             }
             PredicateKind::Projection(..)
             | PredicateKind::Subtype(..)
+            | PredicateKind::Coerce(..)
             | PredicateKind::RegionOutlives(..)
             | PredicateKind::WellFormed(..)
             | PredicateKind::ObjectSafe(..)
@@ -789,6 +863,7 @@ impl<'tcx> Predicate<'tcx> {
             PredicateKind::Trait(..)
             | PredicateKind::Projection(..)
             | PredicateKind::Subtype(..)
+            | PredicateKind::Coerce(..)
             | PredicateKind::RegionOutlives(..)
             | PredicateKind::WellFormed(..)
             | PredicateKind::ObjectSafe(..)
@@ -802,7 +877,7 @@ impl<'tcx> Predicate<'tcx> {
 
 /// Represents the bounds declared on a particular set of type
 /// parameters. Should eventually be generalized into a flag list of
-/// where-clauses. You can obtain a `InstantiatedPredicates` list from a
+/// where-clauses. You can obtain an `InstantiatedPredicates` list from a
 /// `GenericPredicates` by using the `instantiate` method. Note that this method
 /// reflects an important semantic invariant of `InstantiatedPredicates`: while
 /// the `GenericPredicates` are expressed in terms of the bound type
@@ -835,7 +910,7 @@ impl<'tcx> InstantiatedPredicates<'tcx> {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, HashStable, TyEncodable, TyDecodable)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, HashStable, TyEncodable, TyDecodable, TypeFoldable)]
 pub struct OpaqueTypeKey<'tcx> {
     pub def_id: DefId,
     pub substs: SubstsRef<'tcx>,
@@ -1229,7 +1304,7 @@ impl<'tcx> ParamEnv<'tcx> {
             Reveal::UserFacing => ParamEnvAnd { param_env: self, value },
 
             Reveal::All => {
-                if value.is_global() {
+                if value.is_known_global() {
                     ParamEnvAnd { param_env: self.without_caller_bounds(), value }
                 } else {
                     ParamEnvAnd { param_env: self, value }
@@ -1241,7 +1316,7 @@ impl<'tcx> ParamEnv<'tcx> {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, TypeFoldable)]
 pub struct ConstnessAnd<T> {
-    pub constness: Constness,
+    pub constness: BoundConstness,
     pub value: T,
 }
 
@@ -1249,18 +1324,18 @@ pub struct ConstnessAnd<T> {
 // the constness of trait bounds is being propagated correctly.
 pub trait WithConstness: Sized {
     #[inline]
-    fn with_constness(self, constness: Constness) -> ConstnessAnd<Self> {
+    fn with_constness(self, constness: BoundConstness) -> ConstnessAnd<Self> {
         ConstnessAnd { constness, value: self }
     }
 
     #[inline]
-    fn with_const(self) -> ConstnessAnd<Self> {
-        self.with_constness(Constness::Const)
+    fn with_const_if_const(self) -> ConstnessAnd<Self> {
+        self.with_constness(BoundConstness::ConstIfConst)
     }
 
     #[inline]
     fn without_const(self) -> ConstnessAnd<Self> {
-        self.with_constness(Constness::NotConst)
+        self.with_constness(BoundConstness::NotConst)
     }
 }
 
@@ -1308,7 +1383,7 @@ bitflags! {
     }
 }
 
-/// Definition of a variant -- a struct's fields or a enum variant.
+/// Definition of a variant -- a struct's fields or an enum variant.
 #[derive(Debug, HashStable)]
 pub struct VariantDef {
     /// `DefId` that identifies the variant itself.
@@ -1881,13 +1956,11 @@ impl<'tcx> TyCtxt<'tcx> {
         scope: DefId,
         block: hir::HirId,
     ) -> (Ident, DefId) {
-        let scope =
-            match ident.span.normalize_to_macros_2_0_and_adjust(self.expn_that_defined(scope)) {
-                Some(actual_expansion) => {
-                    self.hir().definitions().parent_module_of_macro_def(actual_expansion)
-                }
-                None => self.parent_module(block).to_def_id(),
-            };
+        let scope = ident
+            .span
+            .normalize_to_macros_2_0_and_adjust(self.expn_that_defined(scope))
+            .and_then(|actual_expansion| actual_expansion.expn_data().parent_module)
+            .unwrap_or_else(|| self.parent_module(block).to_def_id());
         (ident, scope)
     }
 
@@ -1960,12 +2033,14 @@ pub fn ast_uint_ty(uty: UintTy) -> ast::UintTy {
 }
 
 pub fn provide(providers: &mut ty::query::Providers) {
+    closure::provide(providers);
     context::provide(providers);
     erase_regions::provide(providers);
     layout::provide(providers);
     util::provide(providers);
     print::provide(providers);
     super::util::bug::provide(providers);
+    super::middle::provide(providers);
     *providers = ty::query::Providers {
         trait_impls_of: trait_def::trait_impls_of_provider,
         type_uninhabited_from: inhabitedness::type_uninhabited_from,
@@ -2009,19 +2084,3 @@ impl<'tcx> fmt::Debug for SymbolName<'tcx> {
         fmt::Display::fmt(&self.name, fmt)
     }
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, HashStable)]
-pub enum VtblEntry<'tcx> {
-    MetadataDropInPlace,
-    MetadataSize,
-    MetadataAlign,
-    Vacant,
-    Method(DefId, SubstsRef<'tcx>),
-}
-
-pub const COMMON_VTABLE_ENTRIES: &[VtblEntry<'_>] =
-    &[VtblEntry::MetadataDropInPlace, VtblEntry::MetadataSize, VtblEntry::MetadataAlign];
-
-pub const COMMON_VTABLE_ENTRIES_DROPINPLACE: usize = 0;
-pub const COMMON_VTABLE_ENTRIES_SIZE: usize = 1;
-pub const COMMON_VTABLE_ENTRIES_ALIGN: usize = 2;

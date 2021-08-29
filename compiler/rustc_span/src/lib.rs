@@ -16,10 +16,12 @@
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![feature(array_windows)]
 #![feature(crate_visibility_modifier)]
+#![feature(if_let_guard)]
 #![feature(negative_impls)]
 #![feature(nll)]
 #![feature(min_specialization)]
 #![feature(thread_local_const_init)]
+#![cfg_attr(bootstrap, allow(incomplete_features))] // if_let_guard
 
 #[macro_use]
 extern crate rustc_macros;
@@ -36,16 +38,14 @@ use source_map::SourceMap;
 pub mod edition;
 use edition::Edition;
 pub mod hygiene;
-pub use hygiene::SyntaxContext;
 use hygiene::Transparency;
-pub use hygiene::{DesugaringKind, ExpnData, ExpnId, ExpnKind, ForLoopLoc, MacroKind};
+pub use hygiene::{DesugaringKind, ExpnKind, ForLoopLoc, MacroKind};
+pub use hygiene::{ExpnData, ExpnHash, ExpnId, LocalExpnId, SyntaxContext};
 pub mod def_id;
 use def_id::{CrateNum, DefId, DefPathHash, LOCAL_CRATE};
 pub mod lev_distance;
 mod span_encoding;
 pub use span_encoding::{Span, DUMMY_SP};
-
-pub mod crate_disambiguator;
 
 pub mod symbol;
 pub use symbol::{sym, Symbol};
@@ -53,19 +53,16 @@ pub use symbol::{sym, Symbol};
 mod analyze_source_file;
 pub mod fatal_error;
 
-use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::sync::{Lock, Lrc};
 
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::cmp::{self, Ordering};
 use std::fmt;
 use std::hash::Hash;
 use std::ops::{Add, Range, Sub};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::thread::LocalKey;
 
 use md5::Md5;
 use sha1::Digest;
@@ -99,24 +96,70 @@ impl SessionGlobals {
     }
 }
 
-pub fn with_session_globals<R>(edition: Edition, f: impl FnOnce() -> R) -> R {
+#[inline]
+pub fn create_session_globals_then<R>(edition: Edition, f: impl FnOnce() -> R) -> R {
+    assert!(
+        !SESSION_GLOBALS.is_set(),
+        "SESSION_GLOBALS should never be overwritten! \
+         Use another thread if you need another SessionGlobals"
+    );
     let session_globals = SessionGlobals::new(edition);
     SESSION_GLOBALS.set(&session_globals, f)
 }
 
-pub fn with_default_session_globals<R>(f: impl FnOnce() -> R) -> R {
-    with_session_globals(edition::DEFAULT_EDITION, f)
+#[inline]
+pub fn set_session_globals_then<R>(session_globals: &SessionGlobals, f: impl FnOnce() -> R) -> R {
+    assert!(
+        !SESSION_GLOBALS.is_set(),
+        "SESSION_GLOBALS should never be overwritten! \
+         Use another thread if you need another SessionGlobals"
+    );
+    SESSION_GLOBALS.set(session_globals, f)
+}
+
+#[inline]
+pub fn create_default_session_if_not_set_then<R, F>(f: F) -> R
+where
+    F: FnOnce(&SessionGlobals) -> R,
+{
+    create_session_if_not_set_then(edition::DEFAULT_EDITION, f)
+}
+
+#[inline]
+pub fn create_session_if_not_set_then<R, F>(edition: Edition, f: F) -> R
+where
+    F: FnOnce(&SessionGlobals) -> R,
+{
+    if !SESSION_GLOBALS.is_set() {
+        let session_globals = SessionGlobals::new(edition);
+        SESSION_GLOBALS.set(&session_globals, || SESSION_GLOBALS.with(f))
+    } else {
+        SESSION_GLOBALS.with(f)
+    }
+}
+
+#[inline]
+pub fn with_session_globals<R, F>(f: F) -> R
+where
+    F: FnOnce(&SessionGlobals) -> R,
+{
+    SESSION_GLOBALS.with(f)
+}
+
+#[inline]
+pub fn create_default_session_globals_then<R>(f: impl FnOnce() -> R) -> R {
+    create_session_globals_then(edition::DEFAULT_EDITION, f)
 }
 
 // If this ever becomes non thread-local, `decode_syntax_context`
 // and `decode_expn_id` will need to be updated to handle concurrent
 // deserialization.
-scoped_tls::scoped_thread_local!(pub static SESSION_GLOBALS: SessionGlobals);
+scoped_tls::scoped_thread_local!(static SESSION_GLOBALS: SessionGlobals);
 
 // FIXME: We should use this enum or something like it to get rid of the
 // use of magic `/rust/1.x/...` paths across the board.
 #[derive(Debug, Eq, PartialEq, Clone, Ord, PartialOrd)]
-#[derive(HashStable_Generic, Decodable)]
+#[derive(Decodable)]
 pub enum RealFileName {
     LocalPath(PathBuf),
     /// For remapped paths (namely paths into libstd that have been mapped
@@ -228,7 +271,7 @@ impl RealFileName {
 
 /// Differentiates between real files and common virtual files.
 #[derive(Debug, Eq, PartialEq, Clone, Ord, PartialOrd, Hash)]
-#[derive(HashStable_Generic, Decodable, Encodable)]
+#[derive(Decodable, Encodable)]
 pub enum FileName {
     Real(RealFileName),
     /// Call to `quote!`.
@@ -476,10 +519,7 @@ impl Span {
 
     /// Returns `true` if `span` originates in a derive-macro's expansion.
     pub fn in_derive_expansion(self) -> bool {
-        matches!(
-            self.ctxt().outer_expn_data().kind,
-            ExpnKind::Macro { kind: MacroKind::Derive, name: _, proc_macro: _ }
-        )
+        matches!(self.ctxt().outer_expn_data().kind, ExpnKind::Macro(MacroKind::Derive, _))
     }
 
     #[inline]
@@ -857,13 +897,13 @@ impl<D: Decoder> Decodable<D> for Span {
 /// the `SourceMap` provided to this function. If that is not available,
 /// we fall back to printing the raw `Span` field values.
 pub fn with_source_map<T, F: FnOnce() -> T>(source_map: Lrc<SourceMap>, f: F) -> T {
-    SESSION_GLOBALS.with(|session_globals| {
+    with_session_globals(|session_globals| {
         *session_globals.source_map.borrow_mut() = Some(source_map);
     });
     struct ClearSourceMap;
     impl Drop for ClearSourceMap {
         fn drop(&mut self) {
-            SESSION_GLOBALS.with(|session_globals| {
+            with_session_globals(|session_globals| {
                 session_globals.source_map.borrow_mut().take();
             });
         }
@@ -882,7 +922,7 @@ pub fn debug_with_source_map(
 }
 
 pub fn default_span_debug(span: Span, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    SESSION_GLOBALS.with(|session_globals| {
+    with_session_globals(|session_globals| {
         if let Some(source_map) = &*session_globals.source_map.borrow() {
             debug_with_source_map(span, f, source_map)
         } else {
@@ -1508,13 +1548,11 @@ impl SourceFile {
     /// number. If the source_file is empty or the position is located before the
     /// first line, `None` is returned.
     pub fn lookup_line(&self, pos: BytePos) -> Option<usize> {
-        if self.lines.is_empty() {
-            return None;
+        match self.lines.binary_search(&pos) {
+            Ok(idx) => Some(idx),
+            Err(0) => None,
+            Err(idx) => Some(idx - 1),
         }
-
-        let line_index = lookup_line(&self.lines[..], pos);
-        assert!(line_index < self.lines.len() as isize);
-        if line_index >= 0 { Some(line_index as usize) } else { None }
     }
 
     pub fn line_bounds(&self, line_index: usize) -> Range<BytePos> {
@@ -1913,27 +1951,12 @@ impl InnerSpan {
     }
 }
 
-// Given a slice of line start positions and a position, returns the index of
-// the line the position is on. Returns -1 if the position is located before
-// the first line.
-fn lookup_line(lines: &[BytePos], pos: BytePos) -> isize {
-    match lines.binary_search(&pos) {
-        Ok(line) => line as isize,
-        Err(line) => line as isize - 1,
-    }
-}
-
 /// Requirements for a `StableHashingContext` to be used in this crate.
 ///
 /// This is a hack to allow using the [`HashStable_Generic`] derive macro
 /// instead of implementing everything in rustc_middle.
 pub trait HashStableContext {
     fn def_path_hash(&self, def_id: DefId) -> DefPathHash;
-    /// Obtains a cache for storing the `Fingerprint` of an `ExpnId`.
-    /// This method allows us to have multiple `HashStableContext` implementations
-    /// that hash things in a different way, without the results of one polluting
-    /// the cache of the other.
-    fn expn_id_cache() -> &'static LocalKey<ExpnIdCache>;
     fn hash_spans(&self) -> bool;
     fn span_data_to_lines_and_cols(
         &mut self,
@@ -2005,62 +2028,5 @@ where
         let len = (span.hi - span.lo).0;
         Hash::hash(&col_line, hasher);
         Hash::hash(&len, hasher);
-    }
-}
-
-impl<CTX: HashStableContext> HashStable<CTX> for SyntaxContext {
-    fn hash_stable(&self, ctx: &mut CTX, hasher: &mut StableHasher) {
-        const TAG_EXPANSION: u8 = 0;
-        const TAG_NO_EXPANSION: u8 = 1;
-
-        if *self == SyntaxContext::root() {
-            TAG_NO_EXPANSION.hash_stable(ctx, hasher);
-        } else {
-            TAG_EXPANSION.hash_stable(ctx, hasher);
-            let (expn_id, transparency) = self.outer_mark();
-            expn_id.hash_stable(ctx, hasher);
-            transparency.hash_stable(ctx, hasher);
-        }
-    }
-}
-
-pub type ExpnIdCache = RefCell<Vec<Option<Fingerprint>>>;
-
-impl<CTX: HashStableContext> HashStable<CTX> for ExpnId {
-    fn hash_stable(&self, ctx: &mut CTX, hasher: &mut StableHasher) {
-        const TAG_ROOT: u8 = 0;
-        const TAG_NOT_ROOT: u8 = 1;
-
-        if *self == ExpnId::root() {
-            TAG_ROOT.hash_stable(ctx, hasher);
-            return;
-        }
-
-        // Since the same expansion context is usually referenced many
-        // times, we cache a stable hash of it and hash that instead of
-        // recursing every time.
-        let index = self.as_u32() as usize;
-        let res = CTX::expn_id_cache().with(|cache| cache.borrow().get(index).copied().flatten());
-
-        if let Some(res) = res {
-            res.hash_stable(ctx, hasher);
-        } else {
-            let new_len = index + 1;
-
-            let mut sub_hasher = StableHasher::new();
-            TAG_NOT_ROOT.hash_stable(ctx, &mut sub_hasher);
-            self.expn_data().hash_stable(ctx, &mut sub_hasher);
-            let sub_hash: Fingerprint = sub_hasher.finish();
-
-            CTX::expn_id_cache().with(|cache| {
-                let mut cache = cache.borrow_mut();
-                if cache.len() < new_len {
-                    cache.resize(new_len, None);
-                }
-                let prev = cache[index].replace(sub_hash);
-                assert_eq!(prev, None, "Cache slot was filled");
-            });
-            sub_hash.hash_stable(ctx, hasher);
-        }
     }
 }

@@ -1,10 +1,11 @@
 use std::cmp;
 
 use crate::ich::StableHashingContext;
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_errors::{DiagnosticBuilder, DiagnosticId};
 use rustc_hir::HirId;
+use rustc_index::vec::IndexVec;
 use rustc_session::lint::{
     builtin::{self, FORBIDDEN_LINT_GROUPS},
     FutureIncompatibilityReason, Level, Lint, LintId,
@@ -28,9 +29,6 @@ pub enum LintLevelSource {
     /// The provided `Level` is the level specified on the command line.
     /// (The actual level may be lower due to `--cap-lints`.)
     CommandLine(Symbol, Level),
-
-    /// Lint is being forced to warn no matter what.
-    ForceWarn(Symbol),
 }
 
 impl LintLevelSource {
@@ -39,7 +37,6 @@ impl LintLevelSource {
             LintLevelSource::Default => symbol::kw::Default,
             LintLevelSource::Node(name, _, _) => name,
             LintLevelSource::CommandLine(name, _) => name,
-            LintLevelSource::ForceWarn(name) => name,
         }
     }
 
@@ -48,7 +45,6 @@ impl LintLevelSource {
             LintLevelSource::Default => DUMMY_SP,
             LintLevelSource::Node(_, span, _) => span,
             LintLevelSource::CommandLine(_, _) => DUMMY_SP,
-            LintLevelSource::ForceWarn(_) => DUMMY_SP,
         }
     }
 }
@@ -56,48 +52,40 @@ impl LintLevelSource {
 /// A tuple of a lint level and its source.
 pub type LevelAndSource = (Level, LintLevelSource);
 
-#[derive(Debug)]
+#[derive(Debug, HashStable)]
 pub struct LintLevelSets {
-    pub list: Vec<LintSet>,
+    pub list: IndexVec<LintStackIndex, LintSet>,
     pub lint_cap: Level,
-    pub force_warns: FxHashSet<LintId>,
 }
 
-#[derive(Debug)]
-pub enum LintSet {
-    CommandLine {
-        // -A,-W,-D flags, a `Symbol` for the flag itself and `Level` for which
-        // flag.
-        specs: FxHashMap<LintId, LevelAndSource>,
-    },
+rustc_index::newtype_index! {
+    #[derive(HashStable)]
+    pub struct LintStackIndex {
+        const COMMAND_LINE = 0,
+    }
+}
 
-    Node {
-        specs: FxHashMap<LintId, LevelAndSource>,
-        parent: u32,
-    },
+#[derive(Debug, HashStable)]
+pub struct LintSet {
+    // -A,-W,-D flags, a `Symbol` for the flag itself and `Level` for which
+    // flag.
+    pub specs: FxHashMap<LintId, LevelAndSource>,
+
+    pub parent: LintStackIndex,
 }
 
 impl LintLevelSets {
     pub fn new() -> Self {
-        LintLevelSets {
-            list: Vec::new(),
-            lint_cap: Level::Forbid,
-            force_warns: FxHashSet::default(),
-        }
+        LintLevelSets { list: IndexVec::new(), lint_cap: Level::Forbid }
     }
 
     pub fn get_lint_level(
         &self,
         lint: &'static Lint,
-        idx: u32,
+        idx: LintStackIndex,
         aux: Option<&FxHashMap<LintId, LevelAndSource>>,
         sess: &Session,
     ) -> LevelAndSource {
-        // Check whether we should always warn
-        if self.force_warns.contains(&LintId::of(lint)) {
-            return (Level::Warn, LintLevelSource::ForceWarn(Symbol::intern(lint.name)));
-        }
-
         let (level, mut src) = self.get_lint_id_level(LintId::of(lint), idx, aux);
 
         // If `level` is none then we actually assume the default level for this
@@ -123,8 +111,13 @@ impl LintLevelSets {
             }
         }
 
-        // Ensure that we never exceed the `--cap-lints` argument.
-        level = cmp::min(level, self.lint_cap);
+        // Ensure that we never exceed the `--cap-lints` argument
+        // unless the source is a --force-warn
+        level = if let LintLevelSource::CommandLine(_, Level::ForceWarn) = src {
+            level
+        } else {
+            cmp::min(level, self.lint_cap)
+        };
 
         if let Some(driver_level) = sess.driver_lint_caps.get(&LintId::of(lint)) {
             // Ensure that we never exceed driver level.
@@ -137,7 +130,7 @@ impl LintLevelSets {
     pub fn get_lint_id_level(
         &self,
         id: LintId,
-        mut idx: u32,
+        mut idx: LintStackIndex,
         aux: Option<&FxHashMap<LintId, LevelAndSource>>,
     ) -> (Option<Level>, LintLevelSource) {
         if let Some(specs) = aux {
@@ -146,20 +139,14 @@ impl LintLevelSets {
             }
         }
         loop {
-            match self.list[idx as usize] {
-                LintSet::CommandLine { ref specs } => {
-                    if let Some(&(level, src)) = specs.get(&id) {
-                        return (Some(level), src);
-                    }
-                    return (None, LintLevelSource::Default);
-                }
-                LintSet::Node { ref specs, parent } => {
-                    if let Some(&(level, src)) = specs.get(&id) {
-                        return (Some(level), src);
-                    }
-                    idx = parent;
-                }
+            let LintSet { ref specs, parent } = self.list[idx];
+            if let Some(&(level, src)) = specs.get(&id) {
+                return (Some(level), src);
             }
+            if idx == COMMAND_LINE {
+                return (None, LintLevelSource::Default);
+            }
+            idx = parent;
         }
     }
 }
@@ -167,7 +154,7 @@ impl LintLevelSets {
 #[derive(Debug)]
 pub struct LintLevelMap {
     pub sets: LintLevelSets,
-    pub id_to_set: FxHashMap<HirId, u32>,
+    pub id_to_set: FxHashMap<HirId, LintStackIndex>,
 }
 
 impl LintLevelMap {
@@ -191,33 +178,11 @@ impl LintLevelMap {
 impl<'a> HashStable<StableHashingContext<'a>> for LintLevelMap {
     #[inline]
     fn hash_stable(&self, hcx: &mut StableHashingContext<'a>, hasher: &mut StableHasher) {
-        let LintLevelMap { ref sets, ref id_to_set, .. } = *self;
+        let LintLevelMap { ref sets, ref id_to_set } = *self;
 
         id_to_set.hash_stable(hcx, hasher);
 
-        let LintLevelSets { ref list, lint_cap, .. } = *sets;
-
-        lint_cap.hash_stable(hcx, hasher);
-
-        hcx.while_hashing_spans(true, |hcx| {
-            list.len().hash_stable(hcx, hasher);
-
-            // We are working under the assumption here that the list of
-            // lint-sets is built in a deterministic order.
-            for lint_set in list {
-                ::std::mem::discriminant(lint_set).hash_stable(hcx, hasher);
-
-                match *lint_set {
-                    LintSet::CommandLine { ref specs } => {
-                        specs.hash_stable(hcx, hasher);
-                    }
-                    LintSet::Node { ref specs, parent } => {
-                        specs.hash_stable(hcx, hasher);
-                        parent.hash_stable(hcx, hasher);
-                    }
-                }
-            }
-        })
+        hcx.while_hashing_spans(true, |hcx| sets.hash_stable(hcx, hasher))
     }
 }
 
@@ -258,8 +223,13 @@ pub fn struct_lint_level<'s, 'd>(
         let lint_id = LintId::of(lint);
         let future_incompatible = lint.future_incompatible;
 
-        let has_future_breakage =
-            future_incompatible.map_or(false, |incompat| incompat.future_breakage.is_some());
+        let has_future_breakage = future_incompatible.map_or(
+            // Default allow lints trigger too often for testing.
+            sess.opts.debugging_opts.future_incompat_test && lint.default_level != Level::Allow,
+            |incompat| {
+                matches!(incompat.reason, FutureIncompatibilityReason::FutureReleaseErrorReportNow)
+            },
+        );
 
         let mut err = match (level, span) {
             (Level::Allow, span) => {
@@ -275,6 +245,8 @@ pub fn struct_lint_level<'s, 'd>(
             }
             (Level::Warn, Some(span)) => sess.struct_span_warn(span, ""),
             (Level::Warn, None) => sess.struct_warn(""),
+            (Level::ForceWarn, Some(span)) => sess.struct_span_force_warn(span, ""),
+            (Level::ForceWarn, None) => sess.struct_force_warn(""),
             (Level::Deny | Level::Forbid, Some(span)) => sess.struct_span_err(span, ""),
             (Level::Deny | Level::Forbid, None) => sess.struct_err(""),
         };
@@ -316,6 +288,7 @@ pub fn struct_lint_level<'s, 'd>(
                     Level::Deny => "-D",
                     Level::Forbid => "-F",
                     Level::Allow => "-A",
+                    Level::ForceWarn => "--force-warn",
                 };
                 let hyphen_case_lint_name = name.replace("_", "-");
                 if lint_flag_val.as_str() == name {
@@ -361,16 +334,10 @@ pub fn struct_lint_level<'s, 'd>(
                     );
                 }
             }
-            LintLevelSource::ForceWarn(_) => {
-                sess.diag_note_once(
-                    &mut err,
-                    DiagnosticMessageId::from(lint),
-                    "warning forced by `force-warns` commandline option",
-                );
-            }
         }
 
-        err.code(DiagnosticId::Lint { name, has_future_breakage });
+        let is_force_warn = matches!(level, Level::ForceWarn);
+        err.code(DiagnosticId::Lint { name, has_future_breakage, is_force_warn });
 
         if let Some(future_incompatible) = future_incompatible {
             let explanation = if lint_id == LintId::of(builtin::UNSTABLE_NAME_COLLISIONS) {
@@ -398,9 +365,14 @@ pub fn struct_lint_level<'s, 'd>(
                  it will become a hard error in a future release!"
                     .to_owned()
             };
-            let citation = format!("for more information, see {}", future_incompatible.reference);
-            err.warn(&explanation);
-            err.note(&citation);
+            if future_incompatible.explain_reason {
+                err.warn(&explanation);
+            }
+            if !future_incompatible.reference.is_empty() {
+                let citation =
+                    format!("for more information, see {}", future_incompatible.reference);
+                err.note(&citation);
+            }
         }
 
         // Finally, run `decorate`. This function is also responsible for emitting the diagnostic.
@@ -420,7 +392,7 @@ pub fn in_external_macro(sess: &Session, span: Span) -> bool {
             false
         }
         ExpnKind::AstPass(_) | ExpnKind::Desugaring(_) => true, // well, it's "external"
-        ExpnKind::Macro { kind: MacroKind::Bang, name: _, proc_macro: _ } => {
+        ExpnKind::Macro(MacroKind::Bang, _) => {
             // Dummy span for the `def_site` means it's an external macro.
             expn_data.def_site.is_dummy() || sess.source_map().is_imported(expn_data.def_site)
         }

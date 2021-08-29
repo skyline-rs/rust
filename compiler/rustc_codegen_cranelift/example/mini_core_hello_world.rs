@@ -1,4 +1,4 @@
-#![feature(no_core, lang_items, box_syntax, never_type, linkage, extern_types, thread_local)]
+#![feature(no_core, lang_items, never_type, linkage, extern_types, thread_local)]
 #![no_core]
 #![allow(dead_code, non_camel_case_types)]
 
@@ -292,7 +292,7 @@ fn main() {
     #[cfg(not(any(jit, windows)))]
     test_tls();
 
-    #[cfg(all(not(jit), target_os = "linux"))]
+    #[cfg(all(not(jit), target_arch = "x86_64", target_os = "linux"))]
     unsafe {
         global_asm_test();
     }
@@ -303,12 +303,12 @@ fn main() {
     assert_eq!(*REF1, *REF2);
 }
 
-#[cfg(all(not(jit), target_os = "linux"))]
+#[cfg(all(not(jit), target_arch = "x86_64", target_os = "linux"))]
 extern "C" {
     fn global_asm_test();
 }
 
-#[cfg(all(not(jit), target_os = "linux"))]
+#[cfg(all(not(jit), target_arch = "x86_64", target_os = "linux"))]
 global_asm! {
     "
     .global global_asm_test

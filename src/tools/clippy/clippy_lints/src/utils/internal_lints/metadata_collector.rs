@@ -9,6 +9,7 @@
 //! a simple mistake)
 
 use if_chain::if_chain;
+use rustc_ast as ast;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_hir::{
     self as hir, def::DefKind, intravisit, intravisit::Visitor, ExprKind, Item, ItemKind, Mutability, QPath,
@@ -31,7 +32,7 @@ use clippy_utils::{
 };
 
 /// This is the output file of the lint collector.
-const OUTPUT_FILE: &str = "../util/gh-pages/metadata_collection.json";
+const OUTPUT_FILE: &str = "../util/gh-pages/lints.json";
 /// These lints are excluded from the export.
 const BLACK_LISTED_LINTS: [&str; 3] = ["lint_author", "deep_code_inspection", "internal_metadata_collector"];
 /// These groups will be ignored by the lint group matcher. This is useful for collections like
@@ -46,8 +47,9 @@ const DEPRECATED_LINT_GROUP_STR: &str = "deprecated";
 const DEPRECATED_LINT_LEVEL: &str = "none";
 /// This array holds Clippy's lint groups with their corresponding default lint level. The
 /// lint level for deprecated lints is set in `DEPRECATED_LINT_LEVEL`.
-const DEFAULT_LINT_LEVELS: [(&str, &str); 8] = [
+const DEFAULT_LINT_LEVELS: &[(&str, &str)] = &[
     ("correctness", "deny"),
+    ("suspicious", "warn"),
     ("restriction", "allow"),
     ("style", "warn"),
     ("pedantic", "allow"),
@@ -66,7 +68,7 @@ const CLIPPY_LINT_GROUP_PREFIX: &str = "clippy::";
 macro_rules! CONFIGURATION_SECTION_TEMPLATE {
     () => {
         r#"
-**Configuration**
+### Configuration
 This lint has the following configuration variables:
 
 {configurations}
@@ -80,7 +82,7 @@ This lint has the following configuration variables:
 /// `default`
 macro_rules! CONFIGURATION_VALUE_TEMPLATE {
     () => {
-        "* {name}: {ty}: {doc} (defaults to `{default}`)\n"
+        "* {name}: `{ty}`: {doc} (defaults to `{default}`)\n"
     };
 }
 
@@ -112,20 +114,25 @@ const DEPRECATED_LINT_TYPE: [&str; 3] = ["clippy_lints", "deprecated_lints", "Cl
 
 /// The index of the applicability name of `paths::APPLICABILITY_VALUES`
 const APPLICABILITY_NAME_INDEX: usize = 2;
+/// This applicability will be set for unresolved applicability values.
+const APPLICABILITY_UNRESOLVED_STR: &str = "Unresolved";
 
 declare_clippy_lint! {
-    /// **What it does:** Collects metadata about clippy lints for the website.
+    /// ### What it does
+    /// Collects metadata about clippy lints for the website.
     ///
     /// This lint will be used to report problems of syntax parsing. You should hopefully never
     /// see this but never say never I guess ^^
     ///
-    /// **Why is this bad?** This is not a bad thing but definitely a hacky way to do it. See
+    /// ### Why is this bad?
+    /// This is not a bad thing but definitely a hacky way to do it. See
     /// issue [#4310](https://github.com/rust-lang/rust-clippy/issues/4310) for a discussion
     /// about the implementation.
     ///
-    /// **Known problems:** Hopefully none. It would be pretty uncool to have a problem here :)
+    /// ### Known problems
+    /// Hopefully none. It would be pretty uncool to have a problem here :)
     ///
-    /// **Example output:**
+    /// ### Example output
     /// ```json,ignore
     /// {
     ///     "id": "internal_metadata_collector",
@@ -134,7 +141,7 @@ declare_clippy_lint! {
     ///         "line": 1
     ///     },
     ///     "group": "clippy::internal",
-    ///     "docs": " **What it does:** Collects metadata about clippy lints for the website. [...] "
+    ///     "docs": " ### What it does\nCollects metadata about clippy lints for the website. [...] "
     /// }
     /// ```
     pub INTERNAL_METADATA_COLLECTOR,
@@ -190,7 +197,7 @@ impl Drop for MetadataCollector {
         let mut lints = std::mem::take(&mut self.lints).into_sorted_vec();
         lints
             .iter_mut()
-            .for_each(|x| x.applicability = applicability_info.remove(&x.id));
+            .for_each(|x| x.applicability = Some(applicability_info.remove(&x.id).unwrap_or_default()));
 
         // Outputting
         if Path::new(OUTPUT_FILE).exists() {
@@ -206,7 +213,7 @@ struct LintMetadata {
     id: String,
     id_span: SerializableSpan,
     group: String,
-    level: &'static str,
+    level: String,
     docs: String,
     /// This field is only used in the output and will only be
     /// mapped shortly before the actual output.
@@ -219,7 +226,7 @@ impl LintMetadata {
             id,
             id_span,
             group,
-            level,
+            level: level.to_string(),
             docs,
             applicability: None,
         }
@@ -267,14 +274,16 @@ impl Serialize for ApplicabilityInfo {
     where
         S: Serializer,
     {
-        let index = self.applicability.unwrap_or_default();
-
         let mut s = serializer.serialize_struct("ApplicabilityInfo", 2)?;
         s.serialize_field("is_multi_part_suggestion", &self.is_multi_part_suggestion)?;
-        s.serialize_field(
-            "applicability",
-            &paths::APPLICABILITY_VALUES[index][APPLICABILITY_NAME_INDEX],
-        )?;
+        if let Some(index) = self.applicability {
+            s.serialize_field(
+                "applicability",
+                &paths::APPLICABILITY_VALUES[index][APPLICABILITY_NAME_INDEX],
+            )?;
+        } else {
+            s.serialize_field("applicability", APPLICABILITY_UNRESOLVED_STR)?;
+        }
         s.end()
     }
 }
@@ -335,10 +344,15 @@ fn parse_config_field_doc(doc_comment: &str) -> Option<(Vec<String>, String)> {
         if let Some(split_pos) = doc_comment.find('.');
         then {
             let mut doc_comment = doc_comment.to_string();
-            let documentation = doc_comment.split_off(split_pos);
+            let mut documentation = doc_comment.split_off(split_pos);
 
+            // Extract lints
             doc_comment.make_ascii_lowercase();
             let lints: Vec<String> = doc_comment.split_off(DOC_START.len()).split(", ").map(str::to_string).collect();
+
+            // Format documentation correctly
+            // split off leading `.` from lint name list and indent for correct formatting
+            documentation = documentation.trim_start_matches('.').trim().replace("\n ", "\n    ");
 
             Some((lints, documentation))
         } else {
@@ -372,7 +386,8 @@ impl<'hir> LateLintPass<'hir> for MetadataCollector {
     /// Collecting lint declarations like:
     /// ```rust, ignore
     /// declare_clippy_lint! {
-    ///     /// **What it does:** Something IDK.
+    ///     /// ### What it does
+    ///     /// Something IDK.
     ///     pub SOME_LINT,
     ///     internal,
     ///     "Who am I?"
@@ -484,17 +499,45 @@ fn extract_attr_docs_or_lint(cx: &LateContext<'_>, item: &Item<'_>) -> Option<St
 /// ```
 ///
 /// Would result in `Hello world!\n=^.^=\n`
+///
+/// ---
+///
+/// This function may modify the doc comment to ensure that the string can be displayed using a
+/// markdown viewer in Clippy's lint list. The following modifications could be applied:
+/// * Removal of leading space after a new line. (Important to display tables)
+/// * Ensures that code blocks only contain language information
 fn extract_attr_docs(cx: &LateContext<'_>, item: &Item<'_>) -> Option<String> {
-    cx.tcx
-        .hir()
-        .attrs(item.hir_id())
-        .iter()
-        .filter_map(|x| x.doc_str().map(|sym| sym.as_str().to_string()))
-        .reduce(|mut acc, sym| {
-            acc.push_str(&sym);
-            acc.push('\n');
-            acc
-        })
+    let attrs = cx.tcx.hir().attrs(item.hir_id());
+    let mut lines = attrs.iter().filter_map(ast::Attribute::doc_str);
+    let mut docs = String::from(&*lines.next()?.as_str());
+    let mut in_code_block = false;
+    for line in lines {
+        docs.push('\n');
+        let line = line.as_str();
+        let line = &*line;
+        if let Some(info) = line.trim_start().strip_prefix("```") {
+            in_code_block = !in_code_block;
+            if in_code_block {
+                let lang = info
+                    .trim()
+                    .split(',')
+                    // remove rustdoc directives
+                    .find(|&s| !matches!(s, "" | "ignore" | "no_run" | "should_panic"))
+                    // if no language is present, fill in "rust"
+                    .unwrap_or("rust");
+                docs.push_str("```");
+                docs.push_str(lang);
+                continue;
+            }
+        }
+        // This removes the leading space that the macro translation introduces
+        if let Some(stripped_doc) = line.strip_prefix(' ') {
+            docs.push_str(stripped_doc);
+        } else if !line.is_empty() {
+            docs.push_str(line);
+        }
+    }
+    Some(docs)
 }
 
 fn get_lint_group_and_level_or_lint(
@@ -502,7 +545,9 @@ fn get_lint_group_and_level_or_lint(
     lint_name: &str,
     item: &'hir Item<'_>,
 ) -> Option<(String, &'static str)> {
-    let result = cx.lint_store.check_lint_name(lint_name, Some(sym::clippy));
+    let result = cx
+        .lint_store
+        .check_lint_name(cx.sess(), lint_name, Some(sym::clippy), &[]);
     if let CheckLintNameResult::Tool(Ok(lint_lst)) = result {
         if let Some(group) = get_lint_group(cx, lint_lst[0]) {
             if EXCLUDED_LINT_GROUPS.contains(&group.as_str()) {

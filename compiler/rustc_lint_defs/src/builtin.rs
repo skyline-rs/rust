@@ -1,12 +1,10 @@
-// ignore-tidy-filelength
-
 //! Some lints that are built in to the compiler.
 //!
 //! These are the built-in lints that are emitted direct in the main
 //! compiler code, rather than using their own custom pass. Those
 //! lints are all available in `rustc_lint::builtin`.
 
-use crate::{declare_lint, declare_lint_pass, FutureBreakage, FutureIncompatibilityReason};
+use crate::{declare_lint, declare_lint_pass, FutureIncompatibilityReason};
 use rustc_span::edition::Edition;
 
 declare_lint! {
@@ -1607,7 +1605,7 @@ declare_lint! {
     Warn,
     "suggest using `dyn Trait` for trait objects",
     @future_incompatible = FutureIncompatibleInfo {
-        reference: "issue #80165 <https://github.com/rust-lang/rust/issues/80165>",
+        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2021/warnings-promoted-to-error.html>",
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2021),
     };
 }
@@ -2692,6 +2690,38 @@ declare_lint! {
 }
 
 declare_lint! {
+    /// The `undefined_naked_function_abi` lint detects naked function definitions that
+    /// either do not specify an ABI or specify the Rust ABI.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// #![feature(naked_functions)]
+    /// #![feature(asm)]
+    ///
+    /// #[naked]
+    /// pub fn default_abi() -> u32 {
+    ///     unsafe { asm!("", options(noreturn)); }
+    /// }
+    ///
+    /// #[naked]
+    /// pub extern "Rust" fn rust_abi() -> u32 {
+    ///     unsafe { asm!("", options(noreturn)); }
+    /// }
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// The Rust ABI is currently undefined. Therefore, naked functions should
+    /// specify a non-Rust ABI.
+    pub UNDEFINED_NAKED_FUNCTION_ABI,
+    Warn,
+    "undefined naked function ABI"
+}
+
+declare_lint! {
     /// The `unsupported_naked_functions` lint detects naked function
     /// definitions that are unsupported but were previously accepted.
     ///
@@ -2701,7 +2731,7 @@ declare_lint! {
     /// #![feature(naked_functions)]
     ///
     /// #[naked]
-    /// pub fn f() -> u32 {
+    /// pub extern "C" fn f() -> u32 {
     ///     42
     /// }
     /// ```
@@ -2719,6 +2749,9 @@ declare_lint! {
     ///
     /// The asm block must not contain any operands other than `const` and
     /// `sym`. Additionally, naked function should specify a non-Rust ABI.
+    ///
+    /// Naked functions cannot be inlined. All forms of the `inline` attribute
+    /// are prohibited.
     ///
     /// While other definitions of naked functions were previously accepted,
     /// they are unsupported and might not work reliably. This is a
@@ -2799,7 +2832,7 @@ declare_lint! {
     /// [issue #79813]: https://github.com/rust-lang/rust/issues/79813
     /// [future-incompatible]: ../index.md#future-incompatible-lints
     pub SEMICOLON_IN_EXPRESSIONS_FROM_MACROS,
-    Allow,
+    Warn,
     "trailing semicolon in macro body used as expression",
     @future_incompatible = FutureIncompatibleInfo {
         reference: "issue #79813 <https://github.com/rust-lang/rust/issues/79813>",
@@ -2967,12 +3000,16 @@ declare_lint_pass! {
         MISSING_ABI,
         INVALID_DOC_ATTRIBUTES,
         SEMICOLON_IN_EXPRESSIONS_FROM_MACROS,
-        DISJOINT_CAPTURE_MIGRATION,
+        RUST_2021_INCOMPATIBLE_CLOSURE_CAPTURES,
         LEGACY_DERIVE_HELPERS,
         PROC_MACRO_BACK_COMPAT,
-        OR_PATTERNS_BACK_COMPAT,
+        RUST_2021_INCOMPATIBLE_OR_PATTERNS,
         LARGE_ASSIGNMENTS,
-        FUTURE_PRELUDE_COLLISION,
+        RUST_2021_PRELUDE_COLLISIONS,
+        RUST_2021_PREFIXES_INCOMPATIBLE_SYNTAX,
+        UNSUPPORTED_CALLING_CONVENTIONS,
+        BREAK_WITH_LABEL_AND_LOOP,
+        UNUSED_ATTRIBUTES,
     ]
 }
 
@@ -3000,18 +3037,20 @@ declare_lint! {
 }
 
 declare_lint! {
-    /// The `disjoint_capture_migration` lint detects variables that aren't completely
-    /// captured when the feature `capture_disjoint_fields` is enabled and it affects the Drop
-    /// order of at least one path starting at this variable.
-    /// It can also detect when a variable implements a trait, but one of its field does not and
-    /// the field is captured by a closure and used with the assumption that said field implements
+    /// The `rust_2021_incompatible_closure_captures` lint detects variables that aren't completely
+    /// captured in Rust 2021, such that the `Drop` order of their fields may differ between
+    /// Rust 2018 and 2021.
+    ///
+    /// It can also detect when a variable implements a trait like `Send`, but one of its fields does not,
+    /// and the field is captured by a closure and used with the assumption that said field implements
     /// the same trait as the root variable.
     ///
     /// ### Example of drop reorder
     ///
     /// ```rust,compile_fail
-    /// # #![deny(disjoint_capture_migration)]
+    /// #![deny(rust_2021_incompatible_closure_captures)]
     /// # #![allow(unused)]
+    ///
     /// struct FancyInteger(i32);
     ///
     /// impl Drop for FancyInteger {
@@ -3039,16 +3078,16 @@ declare_lint! {
     ///
     /// ### Explanation
     ///
-    /// In the above example `p.y` will be dropped at the end of `f` instead of with `c` if
-    /// the feature `capture_disjoint_fields` is enabled.
+    /// In the above example, `p.y` will be dropped at the end of `f` instead of
+    /// with `c` in Rust 2021.
     ///
     /// ### Example of auto-trait
     ///
     /// ```rust,compile_fail
-    /// #![deny(disjoint_capture_migration)]
+    /// #![deny(rust_2021_incompatible_closure_captures)]
     /// use std::thread;
     ///
-    /// struct Pointer (*mut i32);
+    /// struct Pointer(*mut i32);
     /// unsafe impl Send for Pointer {}
     ///
     /// fn main() {
@@ -3064,12 +3103,16 @@ declare_lint! {
     ///
     /// ### Explanation
     ///
-    /// In the above example `fptr.0` is captured when feature `capture_disjoint_fields` is enabled.
-    /// The field is of type *mut i32 which doesn't implement Send, making the code invalid as the
-    /// field cannot be sent between thread safely.
-    pub DISJOINT_CAPTURE_MIGRATION,
+    /// In the above example, only `fptr.0` is captured in Rust 2021.
+    /// The field is of type `*mut i32`, which doesn't implement `Send`,
+    /// making the code invalid as the field cannot be sent between threads safely.
+    pub RUST_2021_INCOMPATIBLE_CLOSURE_CAPTURES,
     Allow,
-    "Drop reorder and auto traits error because of `capture_disjoint_fields`"
+    "detects closures affected by Rust 2021 changes",
+    @future_incompatible = FutureIncompatibleInfo {
+        reason: FutureIncompatibilityReason::EditionSemanticsChange(Edition::Edition2021),
+        explain_reason: false,
+    };
 }
 
 declare_lint_pass!(UnusedDocComment => [UNUSED_DOC_COMMENTS]);
@@ -3171,19 +3214,18 @@ declare_lint! {
     "detects usage of old versions of certain proc-macro crates",
     @future_incompatible = FutureIncompatibleInfo {
         reference: "issue #83125 <https://github.com/rust-lang/rust/issues/83125>",
-        future_breakage: Some(FutureBreakage {
-            date: None
-        })
+        reason: FutureIncompatibilityReason::FutureReleaseErrorReportNow,
     };
 }
 
 declare_lint! {
-    /// The `or_patterns_back_compat` lint detects usage of old versions of or-patterns.
+    /// The `rust_2021_incompatible_or_patterns` lint detects usage of old versions of or-patterns.
     ///
     /// ### Example
     ///
     /// ```rust,compile_fail
-    /// #![deny(or_patterns_back_compat)]
+    /// #![deny(rust_2021_incompatible_or_patterns)]
+    ///
     /// macro_rules! match_any {
     ///     ( $expr:expr , $( $( $pat:pat )|+ => $expr_arm:expr ),+ ) => {
     ///         match $expr {
@@ -3205,24 +3247,24 @@ declare_lint! {
     ///
     /// ### Explanation
     ///
-    /// In Rust 2021, the pat matcher will match new patterns, which include the | character.
-    pub OR_PATTERNS_BACK_COMPAT,
+    /// In Rust 2021, the `pat` matcher will match additional patterns, which include the `|` character.
+    pub RUST_2021_INCOMPATIBLE_OR_PATTERNS,
     Allow,
     "detects usage of old versions of or-patterns",
     @future_incompatible = FutureIncompatibleInfo {
-        reference: "issue #84869 <https://github.com/rust-lang/rust/issues/84869>",
+        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2021/or-patterns-macro-rules.html>",
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2021),
     };
 }
 
 declare_lint! {
-    /// The `future_prelude_collision` lint detects the usage of trait methods which are ambiguous
+    /// The `rust_2021_prelude_collisions` lint detects the usage of trait methods which are ambiguous
     /// with traits added to the prelude in future editions.
     ///
     /// ### Example
     ///
     /// ```rust,compile_fail
-    /// #![deny(future_prelude_collision)]
+    /// #![deny(rust_2021_prelude_collisions)]
     ///
     /// trait Foo {
     ///     fn try_into(self) -> Result<String, !>;
@@ -3250,16 +3292,127 @@ declare_lint! {
     /// In Rust 2021, one of the important introductions is the [prelude changes], which add
     /// `TryFrom`, `TryInto`, and `FromIterator` into the standard library's prelude. Since this
     /// results in an ambiguity as to which method/function to call when an existing `try_into`
-    ///  method is called via dot-call syntax or a `try_from`/`from_iter` associated function
-    ///  is called directly on a type.
+    /// method is called via dot-call syntax or a `try_from`/`from_iter` associated function
+    /// is called directly on a type.
     ///
     /// [prelude changes]: https://blog.rust-lang.org/inside-rust/2021/03/04/planning-rust-2021.html#prelude-changes
-    pub FUTURE_PRELUDE_COLLISION,
+    pub RUST_2021_PRELUDE_COLLISIONS,
     Allow,
     "detects the usage of trait methods which are ambiguous with traits added to the \
         prelude in future editions",
     @future_incompatible = FutureIncompatibleInfo {
-        reference: "issue #85684 <https://github.com/rust-lang/rust/issues/85684>",
+        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2021/prelude.html>",
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2021),
     };
+}
+
+declare_lint! {
+    /// The `rust_2021_prefixes_incompatible_syntax` lint detects identifiers that will be parsed as a
+    /// prefix instead in Rust 2021.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,compile_fail
+    /// #![deny(rust_2021_prefixes_incompatible_syntax)]
+    ///
+    /// macro_rules! m {
+    ///     (z $x:expr) => ();
+    /// }
+    ///
+    /// m!(z"hey");
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// In Rust 2015 and 2018, `z"hey"` is two tokens: the identifier `z`
+    /// followed by the string literal `"hey"`. In Rust 2021, the `z` is
+    /// considered a prefix for `"hey"`.
+    ///
+    /// This lint suggests to add whitespace between the `z` and `"hey"` tokens
+    /// to keep them separated in Rust 2021.
+    pub RUST_2021_PREFIXES_INCOMPATIBLE_SYNTAX,
+    Allow,
+    "identifiers that will be parsed as a prefix in Rust 2021",
+    @future_incompatible = FutureIncompatibleInfo {
+        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2021/reserving-syntax.html>",
+        reason: FutureIncompatibilityReason::EditionError(Edition::Edition2021),
+    };
+    crate_level_only
+}
+
+declare_lint! {
+    /// The `unsupported_calling_conventions` lint is output whenever there is a use of the
+    /// `stdcall`, `fastcall`, `thiscall`, `vectorcall` calling conventions (or their unwind
+    /// variants) on targets that cannot meaningfully be supported for the requested target.
+    ///
+    /// For example `stdcall` does not make much sense for a x86_64 or, more apparently, powerpc
+    /// code, because this calling convention was never specified for those targets.
+    ///
+    /// Historically MSVC toolchains have fallen back to the regular C calling convention for
+    /// targets other than x86, but Rust doesn't really see a similar need to introduce a similar
+    /// hack across many more targets.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,ignore (needs specific targets)
+    /// extern "stdcall" fn stdcall() {}
+    /// ```
+    ///
+    /// This will produce:
+    ///
+    /// ```text
+    /// warning: use of calling convention not supported on this target
+    ///   --> $DIR/unsupported.rs:39:1
+    ///    |
+    /// LL | extern "stdcall" fn stdcall() {}
+    ///    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ///    |
+    ///    = note: `#[warn(unsupported_calling_conventions)]` on by default
+    ///    = warning: this was previously accepted by the compiler but is being phased out;
+    ///               it will become a hard error in a future release!
+    ///    = note: for more information, see issue ...
+    /// ```
+    ///
+    /// ### Explanation
+    ///
+    /// On most of the targets the behaviour of `stdcall` and similar calling conventions is not
+    /// defined at all, but was previously accepted due to a bug in the implementation of the
+    /// compiler.
+    pub UNSUPPORTED_CALLING_CONVENTIONS,
+    Warn,
+    "use of unsupported calling convention",
+    @future_incompatible = FutureIncompatibleInfo {
+        reference: "issue #87678 <https://github.com/rust-lang/rust/issues/87678>",
+    };
+}
+
+declare_lint! {
+    /// The `break_with_label_and_loop` lint detects labeled `break` expressions with
+    /// an unlabeled loop as their value expression.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// 'label: loop {
+    ///     break 'label loop { break 42; };
+    /// };
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// In Rust, loops can have a label, and `break` expressions can refer to that label to
+    /// break out of specific loops (and not necessarily the innermost one). `break` expressions
+    /// can also carry a value expression, which can be another loop. A labeled `break` with an
+    /// unlabeled loop as its value expression is easy to confuse with an unlabeled break with
+    /// a labeled loop and is thus discouraged (but allowed for compatibility); use parentheses
+    /// around the loop expression to silence this warning. Unlabeled `break` expressions with
+    /// labeled loops yield a hard error, which can also be silenced by wrapping the expression
+    /// in parentheses.
+    pub BREAK_WITH_LABEL_AND_LOOP,
+    Warn,
+    "`break` expression with label and unlabeled loop as value expression"
 }

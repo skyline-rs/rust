@@ -2,24 +2,27 @@
 //! generate the actual methods on tcx which find and execute the provider,
 //! manage the caches, and so forth.
 
-use super::queries;
+use crate::{on_disk_cache, queries, Queries};
 use rustc_middle::dep_graph::{DepKind, DepNode, DepNodeIndex, SerializedDepNodeIndex};
-use rustc_middle::ty::query::on_disk_cache;
 use rustc_middle::ty::tls::{self, ImplicitCtxt};
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_query_system::dep_graph::HasDepContext;
-use rustc_query_system::query::{QueryContext, QueryDescription, QueryJobId, QueryMap};
+use rustc_query_system::query::{
+    QueryContext, QueryDescription, QueryJobId, QueryMap, QuerySideEffects,
+};
 
 use rustc_data_structures::sync::Lock;
 use rustc_data_structures::thin_vec::ThinVec;
-use rustc_errors::Diagnostic;
+use rustc_errors::{Diagnostic, Handler};
 use rustc_serialize::opaque;
 use rustc_span::def_id::LocalDefId;
+
+use std::any::Any;
 
 #[derive(Copy, Clone)]
 pub struct QueryCtxt<'tcx> {
     pub tcx: TyCtxt<'tcx>,
-    pub queries: &'tcx super::Queries<'tcx>,
+    pub queries: &'tcx Queries<'tcx>,
 }
 
 impl<'tcx> std::ops::Deref for QueryCtxt<'tcx> {
@@ -82,26 +85,27 @@ impl QueryContext for QueryCtxt<'tcx> {
     }
 
     // Interactions with on_disk_cache
-    fn load_diagnostics(&self, prev_dep_node_index: SerializedDepNodeIndex) -> Vec<Diagnostic> {
-        self.on_disk_cache
+    fn load_side_effects(&self, prev_dep_node_index: SerializedDepNodeIndex) -> QuerySideEffects {
+        self.queries
+            .on_disk_cache
             .as_ref()
-            .map(|c| c.load_diagnostics(**self, prev_dep_node_index))
+            .map(|c| c.load_side_effects(**self, prev_dep_node_index))
             .unwrap_or_default()
     }
 
-    fn store_diagnostics(&self, dep_node_index: DepNodeIndex, diagnostics: ThinVec<Diagnostic>) {
-        if let Some(c) = self.on_disk_cache.as_ref() {
-            c.store_diagnostics(dep_node_index, diagnostics)
+    fn store_side_effects(&self, dep_node_index: DepNodeIndex, side_effects: QuerySideEffects) {
+        if let Some(c) = self.queries.on_disk_cache.as_ref() {
+            c.store_side_effects(dep_node_index, side_effects)
         }
     }
 
-    fn store_diagnostics_for_anon_node(
+    fn store_side_effects_for_anon_node(
         &self,
         dep_node_index: DepNodeIndex,
-        diagnostics: ThinVec<Diagnostic>,
+        side_effects: QuerySideEffects,
     ) {
-        if let Some(c) = self.on_disk_cache.as_ref() {
-            c.store_diagnostics_for_anon_node(dep_node_index, diagnostics)
+        if let Some(c) = self.queries.on_disk_cache.as_ref() {
+            c.store_side_effects_for_anon_node(dep_node_index, side_effects)
         }
     }
 
@@ -137,10 +141,31 @@ impl QueryContext for QueryCtxt<'tcx> {
 }
 
 impl<'tcx> QueryCtxt<'tcx> {
+    #[inline]
+    pub fn from_tcx(tcx: TyCtxt<'tcx>) -> Self {
+        let queries = tcx.queries.as_any();
+        let queries = unsafe {
+            let queries = std::mem::transmute::<&dyn Any, &dyn Any>(queries);
+            let queries = queries.downcast_ref().unwrap();
+            let queries = std::mem::transmute::<&Queries<'_>, &Queries<'_>>(queries);
+            queries
+        };
+        QueryCtxt { tcx, queries }
+    }
+
+    crate fn on_disk_cache(self) -> Option<&'tcx on_disk_cache::OnDiskCache<'tcx>> {
+        self.queries.on_disk_cache.as_ref()
+    }
+
+    #[cfg(parallel_compiler)]
+    pub unsafe fn deadlock(self, registry: &rustc_rayon_core::Registry) {
+        rustc_query_system::query::deadlock(self, registry)
+    }
+
     pub(super) fn encode_query_results(
         self,
         encoder: &mut on_disk_cache::CacheEncoder<'a, 'tcx, opaque::FileEncoder>,
-        query_result_index: &mut on_disk_cache::EncodedQueryResultIndex,
+        query_result_index: &mut on_disk_cache::EncodedDepNodeIndex,
     ) -> opaque::FileEncodeResult {
         macro_rules! encode_queries {
             ($($query:ident,)*) => {
@@ -157,6 +182,15 @@ impl<'tcx> QueryCtxt<'tcx> {
         rustc_cached_queries!(encode_queries!);
 
         Ok(())
+    }
+
+    pub fn try_print_query_stack(
+        self,
+        query: Option<QueryJobId<DepKind>>,
+        handler: &Handler,
+        num_frames: Option<usize>,
+    ) -> usize {
+        rustc_query_system::query::print_query_stack(self, query, handler, num_frames)
     }
 }
 
@@ -462,6 +496,8 @@ macro_rules! define_queries_struct {
             local_providers: Box<Providers>,
             extern_providers: Box<Providers>,
 
+            pub on_disk_cache: Option<OnDiskCache<$tcx>>,
+
             $($(#[$attr])*  $name: QueryState<
                 crate::dep_graph::DepKind,
                 query_keys::$name<$tcx>,
@@ -472,10 +508,12 @@ macro_rules! define_queries_struct {
             pub fn new(
                 local_providers: Providers,
                 extern_providers: Providers,
+                on_disk_cache: Option<OnDiskCache<$tcx>>,
             ) -> Self {
                 Queries {
                     local_providers: Box::new(local_providers),
                     extern_providers: Box::new(extern_providers),
+                    on_disk_cache,
                     $($name: Default::default()),*
                 }
             }
@@ -501,41 +539,14 @@ macro_rules! define_queries_struct {
         }
 
         impl QueryEngine<'tcx> for Queries<'tcx> {
-            #[cfg(parallel_compiler)]
-            unsafe fn deadlock(&'tcx self, tcx: TyCtxt<'tcx>, registry: &rustc_rayon_core::Registry) {
-                let tcx = QueryCtxt { tcx, queries: self };
-                rustc_query_system::query::deadlock(tcx, registry)
-            }
-
-            fn encode_query_results(
-                &'tcx self,
-                tcx: TyCtxt<'tcx>,
-                encoder: &mut on_disk_cache::CacheEncoder<'a, 'tcx, opaque::FileEncoder>,
-                query_result_index: &mut on_disk_cache::EncodedQueryResultIndex,
-            ) -> opaque::FileEncodeResult {
-                let tcx = QueryCtxt { tcx, queries: self };
-                tcx.encode_query_results(encoder, query_result_index)
-            }
-
-            fn exec_cache_promotions(&'tcx self, tcx: TyCtxt<'tcx>) {
-                let tcx = QueryCtxt { tcx, queries: self };
-                tcx.dep_graph.exec_cache_promotions(tcx)
+            fn as_any(&'tcx self) -> &'tcx dyn std::any::Any {
+                let this = unsafe { std::mem::transmute::<&Queries<'_>, &Queries<'_>>(self) };
+                this as _
             }
 
             fn try_mark_green(&'tcx self, tcx: TyCtxt<'tcx>, dep_node: &dep_graph::DepNode) -> bool {
                 let qcx = QueryCtxt { tcx, queries: self };
                 tcx.dep_graph.try_mark_green(qcx, dep_node).is_some()
-            }
-
-            fn try_print_query_stack(
-                &'tcx self,
-                tcx: TyCtxt<'tcx>,
-                query: Option<QueryJobId<dep_graph::DepKind>>,
-                handler: &Handler,
-                num_frames: Option<usize>,
-            ) -> usize {
-                let qcx = QueryCtxt { tcx, queries: self };
-                rustc_query_system::query::print_query_stack(qcx, query, handler, num_frames)
             }
 
             $($(#[$attr])*

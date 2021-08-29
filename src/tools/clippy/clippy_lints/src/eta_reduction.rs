@@ -1,31 +1,35 @@
 use clippy_utils::diagnostics::{span_lint_and_sugg, span_lint_and_then};
-use clippy_utils::higher;
 use clippy_utils::higher::VecArgs;
 use clippy_utils::source::snippet_opt;
 use clippy_utils::ty::{implements_trait, type_is_unsafe_function};
+use clippy_utils::usage::UsedAfterExprVisitor;
+use clippy_utils::{get_enclosing_loop_or_closure, higher};
 use clippy_utils::{is_adjusted, iter_input_pats};
 use if_chain::if_chain;
 use rustc_errors::Applicability;
 use rustc_hir::{def_id, Expr, ExprKind, Param, PatKind, QPath};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::lint::in_external_macro;
-use rustc_middle::ty::{self, Ty};
+use rustc_middle::ty::{self, ClosureKind, Ty};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for closures which just call another function where
+    /// ### What it does
+    /// Checks for closures which just call another function where
     /// the function can be called directly. `unsafe` functions or calls where types
     /// get adjusted are ignored.
     ///
-    /// **Why is this bad?** Needlessly creating a closure adds code for no benefit
+    /// ### Why is this bad?
+    /// Needlessly creating a closure adds code for no benefit
     /// and gives the optimizer more work.
     ///
-    /// **Known problems:** If creating the closure inside the closure has a side-
+    /// ### Known problems
+    /// If creating the closure inside the closure has a side-
     /// effect then moving the closure creation out will change when that side-
     /// effect runs.
     /// See [#1439](https://github.com/rust-lang/rust-clippy/issues/1439) for more details.
     ///
-    /// **Example:**
+    /// ### Example
     /// ```rust,ignore
     /// // Bad
     /// xs.map(|x| foo(x))
@@ -41,17 +45,20 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for closures which only invoke a method on the closure
+    /// ### What it does
+    /// Checks for closures which only invoke a method on the closure
     /// argument and can be replaced by referencing the method directly.
     ///
-    /// **Why is this bad?** It's unnecessary to create the closure.
+    /// ### Why is this bad?
+    /// It's unnecessary to create the closure.
     ///
-    /// **Known problems:** [#3071](https://github.com/rust-lang/rust-clippy/issues/3071),
+    /// ### Known problems
+    /// [#3071](https://github.com/rust-lang/rust-clippy/issues/3071),
     /// [#3942](https://github.com/rust-lang/rust-clippy/issues/3942),
     /// [#4002](https://github.com/rust-lang/rust-clippy/issues/4002)
     ///
     ///
-    /// **Example:**
+    /// ### Example
     /// ```rust,ignore
     /// Some('a').map(|s| s.to_uppercase());
     /// ```
@@ -86,14 +93,14 @@ impl<'tcx> LateLintPass<'tcx> for EtaReduction {
     }
 }
 
-fn check_closure(cx: &LateContext<'_>, expr: &Expr<'_>) {
+fn check_closure<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
     if let ExprKind::Closure(_, decl, eid, _, _) = expr.kind {
         let body = cx.tcx.hir().body(eid);
         let ex = &body.value;
 
         if ex.span.ctxt() != expr.span.ctxt() {
             if decl.inputs.is_empty() {
-                if let Some(VecArgs::Vec(&[])) = higher::vec_macro(cx, ex) {
+                if let Some(VecArgs::Vec(&[])) = higher::VecArgs::hir(cx, ex) {
                     // replace `|| vec![]` with `Vec::new`
                     span_lint_and_sugg(
                         cx,
@@ -131,7 +138,18 @@ fn check_closure(cx: &LateContext<'_>, expr: &Expr<'_>) {
 
             then {
                 span_lint_and_then(cx, REDUNDANT_CLOSURE, expr.span, "redundant closure", |diag| {
-                    if let Some(snippet) = snippet_opt(cx, caller.span) {
+                    if let Some(mut snippet) = snippet_opt(cx, caller.span) {
+                        if_chain! {
+                            if let ty::Closure(_, substs) = fn_ty.kind();
+                            if let ClosureKind::FnMut = substs.as_closure().kind();
+                            if UsedAfterExprVisitor::is_found(cx, caller)
+                                || get_enclosing_loop_or_closure(cx.tcx, expr).is_some();
+
+                            then {
+                                // Mutable closure is used after current expr; we cannot consume it.
+                                snippet = format!("&mut {}", snippet);
+                            }
+                        }
                         diag.span_suggestion(
                             expr.span,
                             "replace the closure with the function itself",

@@ -15,7 +15,8 @@ use rustc_span::hygiene::DesugaringKind;
 use rustc_span::lev_distance::find_best_match_for_name;
 use rustc_span::source_map::{Span, Spanned};
 use rustc_span::symbol::Ident;
-use rustc_span::{BytePos, DUMMY_SP};
+use rustc_span::{BytePos, MultiSpan, DUMMY_SP};
+use rustc_trait_selection::autoderef::Autoderef;
 use rustc_trait_selection::traits::{ObligationCause, Pattern};
 use ty::VariantDef;
 
@@ -626,15 +627,15 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             let binding_parent = tcx.hir().get(binding_parent_id);
             debug!("inner {:?} pat {:?} parent {:?}", inner, pat, binding_parent);
             match binding_parent {
-                hir::Node::Param(hir::Param { span, .. }) => {
-                    if let Ok(snippet) = tcx.sess.source_map().span_to_snippet(inner.span) {
-                        err.span_suggestion(
-                            *span,
-                            &format!("did you mean `{}`", snippet),
-                            format!(" &{}", expected),
-                            Applicability::MachineApplicable,
-                        );
-                    }
+                hir::Node::Param(hir::Param { span, .. })
+                    if let Ok(snippet) = tcx.sess.source_map().span_to_snippet(inner.span) =>
+                {
+                    err.span_suggestion(
+                        *span,
+                        &format!("did you mean `{}`", snippet),
+                        format!(" &{}", expected),
+                        Applicability::MachineApplicable,
+                    );
                 }
                 hir::Node::Arm(_) | hir::Node::Pat(_) => {
                     // rely on match ergonomics or it might be nested `&&pat`
@@ -864,7 +865,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         &self,
         pat: &'tcx Pat<'tcx>,
         qpath: &'tcx hir::QPath<'tcx>,
-        subpats: &'tcx [&'tcx Pat<'tcx>],
+        subpats: &'tcx [Pat<'tcx>],
         ddpos: Option<usize>,
         expected: Ty<'tcx>,
         def_bm: BindingMode,
@@ -982,17 +983,32 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         pat_span: Span,
         res: Res,
         qpath: &hir::QPath<'_>,
-        subpats: &'tcx [&'tcx Pat<'tcx>],
+        subpats: &'tcx [Pat<'tcx>],
         fields: &'tcx [ty::FieldDef],
         expected: Ty<'tcx>,
         had_err: bool,
     ) {
         let subpats_ending = pluralize!(subpats.len());
         let fields_ending = pluralize!(fields.len());
+
+        let subpat_spans = if subpats.is_empty() {
+            vec![pat_span]
+        } else {
+            subpats.iter().map(|p| p.span).collect()
+        };
+        let last_subpat_span = *subpat_spans.last().unwrap();
         let res_span = self.tcx.def_span(res.def_id());
+        let def_ident_span = self.tcx.def_ident_span(res.def_id()).unwrap_or(res_span);
+        let field_def_spans = if fields.is_empty() {
+            vec![res_span]
+        } else {
+            fields.iter().map(|f| f.ident.span).collect()
+        };
+        let last_field_def_span = *field_def_spans.last().unwrap();
+
         let mut err = struct_span_err!(
             self.tcx.sess,
-            pat_span,
+            MultiSpan::from_spans(subpat_spans.clone()),
             E0023,
             "this pattern has {} field{}, but the corresponding {} has {} field{}",
             subpats.len(),
@@ -1002,10 +1018,22 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             fields_ending,
         );
         err.span_label(
-            pat_span,
-            format!("expected {} field{}, found {}", fields.len(), fields_ending, subpats.len(),),
-        )
-        .span_label(res_span, format!("{} defined here", res.descr()));
+            last_subpat_span,
+            &format!("expected {} field{}, found {}", fields.len(), fields_ending, subpats.len()),
+        );
+        if self.tcx.sess.source_map().is_multiline(qpath.span().between(last_subpat_span)) {
+            err.span_label(qpath.span(), "");
+        }
+        if self.tcx.sess.source_map().is_multiline(def_ident_span.between(last_field_def_span)) {
+            err.span_label(def_ident_span, format!("{} defined here", res.descr()));
+        }
+        for span in &field_def_spans[..field_def_spans.len() - 1] {
+            err.span_label(*span, "");
+        }
+        err.span_label(
+            last_field_def_span,
+            &format!("{} has {} field{}", res.descr(), fields.len(), fields_ending),
+        );
 
         // Identify the case `Some(x, y)` where the expected type is e.g. `Option<(T, U)>`.
         // More generally, the expected type wants a tuple variant with one field of an
@@ -1112,7 +1140,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     fn check_pat_tuple(
         &self,
         span: Span,
-        elements: &'tcx [&'tcx Pat<'tcx>],
+        elements: &'tcx [Pat<'tcx>],
         ddpos: Option<usize>,
         expected: Ty<'tcx>,
         def_bm: BindingMode,
@@ -1249,15 +1277,23 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 tcx.sess.struct_span_err(pat.span, "`..` cannot be used in union patterns").emit();
             }
         } else if !etc && !unmentioned_fields.is_empty() {
-            let no_accessible_unmentioned_fields = !unmentioned_fields.iter().any(|(field, _)| {
-                field.vis.is_accessible_from(tcx.parent_module(pat.hir_id).to_def_id(), tcx)
-            });
+            let accessible_unmentioned_fields: Vec<_> = unmentioned_fields
+                .iter()
+                .copied()
+                .filter(|(field, _)| {
+                    field.vis.is_accessible_from(tcx.parent_module(pat.hir_id).to_def_id(), tcx)
+                })
+                .collect();
 
-            if no_accessible_unmentioned_fields {
+            if accessible_unmentioned_fields.is_empty() {
                 unmentioned_err = Some(self.error_no_accessible_fields(pat, &fields));
             } else {
-                unmentioned_err =
-                    Some(self.error_unmentioned_fields(pat, &unmentioned_fields, &fields));
+                unmentioned_err = Some(self.error_unmentioned_fields(
+                    pat,
+                    &accessible_unmentioned_fields,
+                    accessible_unmentioned_fields.len() != unmentioned_fields.len(),
+                    &fields,
+                ));
             }
         }
         match (inexistent_fields_err, unmentioned_err) {
@@ -1284,13 +1320,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             (Some(mut err), None) => {
                 err.emit();
             }
-            (None, None) => {
-                if let Some(mut err) =
-                    self.error_tuple_variant_index_shorthand(variant, pat, fields)
-                {
-                    err.emit();
-                }
+            (None, None) if let Some(mut err) =
+                    self.error_tuple_variant_index_shorthand(variant, pat, fields) =>
+            {
+                err.emit();
             }
+            (None, None) => {}
         }
         no_field_errors
     }
@@ -1582,17 +1617,19 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         &self,
         pat: &Pat<'_>,
         unmentioned_fields: &[(&ty::FieldDef, Ident)],
+        have_inaccessible_fields: bool,
         fields: &'tcx [hir::PatField<'tcx>],
     ) -> DiagnosticBuilder<'tcx> {
+        let inaccessible = if have_inaccessible_fields { " and inaccessible fields" } else { "" };
         let field_names = if unmentioned_fields.len() == 1 {
-            format!("field `{}`", unmentioned_fields[0].1)
+            format!("field `{}`{}", unmentioned_fields[0].1, inaccessible)
         } else {
             let fields = unmentioned_fields
                 .iter()
                 .map(|(_, name)| format!("`{}`", name))
                 .collect::<Vec<String>>()
                 .join(", ");
-            format!("fields {}", fields)
+            format!("fields {}{}", fields, inaccessible)
         };
         let mut err = struct_span_err!(
             self.tcx.sess,
@@ -1623,17 +1660,19 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         err.span_suggestion(
             sp,
             &format!(
-                "include the missing field{} in the pattern",
+                "include the missing field{} in the pattern{}",
                 if len == 1 { "" } else { "s" },
+                if have_inaccessible_fields { " and ignore the inaccessible fields" } else { "" }
             ),
             format!(
-                "{}{}{}",
+                "{}{}{}{}",
                 prefix,
                 unmentioned_fields
                     .iter()
                     .map(|(_, name)| name.to_string())
                     .collect::<Vec<_>>()
                     .join(", "),
+                if have_inaccessible_fields { ", .." } else { "" },
                 postfix,
             ),
             Applicability::MachineApplicable,
@@ -1746,9 +1785,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     fn check_pat_slice(
         &self,
         span: Span,
-        before: &'tcx [&'tcx Pat<'tcx>],
+        before: &'tcx [Pat<'tcx>],
         slice: Option<&'tcx Pat<'tcx>>,
-        after: &'tcx [&'tcx Pat<'tcx>],
+        after: &'tcx [Pat<'tcx>],
         expected: Ty<'tcx>,
         def_bm: BindingMode,
         ti: TopInfo<'tcx>,
@@ -1769,7 +1808,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // The expected type must be an array or slice, but was neither, so error.
             _ => {
                 if !expected.references_error() {
-                    self.error_expected_array_or_slice(span, expected);
+                    self.error_expected_array_or_slice(span, expected, ti);
                 }
                 let err = self.tcx.ty_error();
                 (err, Some(err), err)
@@ -1882,7 +1921,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         .emit();
     }
 
-    fn error_expected_array_or_slice(&self, span: Span, expected_ty: Ty<'tcx>) {
+    fn error_expected_array_or_slice(&self, span: Span, expected_ty: Ty<'tcx>, ti: TopInfo<'tcx>) {
         let mut err = struct_span_err!(
             self.tcx.sess,
             span,
@@ -1893,6 +1932,19 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         if let ty::Ref(_, ty, _) = expected_ty.kind() {
             if let ty::Array(..) | ty::Slice(..) = ty.kind() {
                 err.help("the semantics of slice patterns changed recently; see issue #62254");
+            }
+        } else if Autoderef::new(&self.infcx, self.param_env, self.body_id, span, expected_ty, span)
+            .any(|(ty, _)| matches!(ty.kind(), ty::Slice(..)))
+        {
+            if let (Some(span), true) = (ti.span, ti.origin_expr) {
+                if let Ok(snippet) = self.tcx.sess.source_map().span_to_snippet(span) {
+                    err.span_suggestion(
+                        span,
+                        "consider slicing here",
+                        format!("{}[..]", snippet),
+                        Applicability::MachineApplicable,
+                    );
+                }
             }
         }
         err.span_label(span, format!("pattern cannot match with input type `{}`", expected_ty));

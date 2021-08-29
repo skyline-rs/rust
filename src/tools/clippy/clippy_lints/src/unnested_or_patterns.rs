@@ -1,6 +1,6 @@
 #![allow(clippy::wildcard_imports, clippy::enum_glob_use)]
 
-use clippy_utils::ast_utils::{eq_field_pat, eq_id, eq_pat, eq_path, eq_maybe_qself};
+use clippy_utils::ast_utils::{eq_field_pat, eq_id, eq_maybe_qself, eq_pat, eq_path};
 use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::{meets_msrv, msrvs, over};
 use rustc_ast::mut_visit::*;
@@ -17,22 +17,17 @@ use std::cell::Cell;
 use std::mem;
 
 declare_clippy_lint! {
-    /// **What it does:**
-    ///
+    /// ### What it does
     /// Checks for unnested or-patterns, e.g., `Some(0) | Some(2)` and
     /// suggests replacing the pattern with a nested one, `Some(0 | 2)`.
     ///
     /// Another way to think of this is that it rewrites patterns in
     /// *disjunctive normal form (DNF)* into *conjunctive normal form (CNF)*.
     ///
-    /// **Why is this bad?**
-    ///
+    /// ### Why is this bad?
     /// In the example above, `Some` is repeated, which unncessarily complicates the pattern.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust
     /// fn main() {
     ///     if let Some(0) | Some(2) = Some(0) {}
@@ -40,8 +35,6 @@ declare_clippy_lint! {
     /// ```
     /// Use instead:
     /// ```rust
-    /// #![feature(or_patterns)]
-    ///
     /// fn main() {
     ///     if let Some(0 | 2) = Some(0) {}
     /// }
@@ -74,7 +67,7 @@ impl EarlyLintPass for UnnestedOrPatterns {
 
     fn check_expr(&mut self, cx: &EarlyContext<'_>, e: &ast::Expr) {
         if meets_msrv(self.msrv.as_ref(), &msrvs::OR_PATTERNS) {
-            if let ast::ExprKind::Let(pat, _) = &e.kind {
+            if let ast::ExprKind::Let(pat, _, _) = &e.kind {
                 lint_unnested_or_patterns(cx, pat);
             }
         }
@@ -277,7 +270,8 @@ fn transform_with_focus_on_idx(alternatives: &mut Vec<P<Pat>>, focus_idx: usize)
             ps1, start, alternatives,
             |k, ps1, idx| matches!(
                 k,
-                TupleStruct(qself2, path2, ps2) if eq_maybe_qself(qself1, qself2) && eq_path(path1, path2) && eq_pre_post(ps1, ps2, idx)
+                TupleStruct(qself2, path2, ps2)
+                    if eq_maybe_qself(qself1, qself2) && eq_path(path1, path2) && eq_pre_post(ps1, ps2, idx)
             ),
             |k| always_pat!(k, TupleStruct(_, _, ps) => ps),
         ),

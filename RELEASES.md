@@ -1,3 +1,270 @@
+Version 1.55.0 (2021-09-09)
+============================
+
+Language
+--------
+- [You can now write open "from" range patterns (`X..`), which will start at `X` and
+  will end at the maximum value of the integer.][83918]
+- [You can now explicitly import the prelude of different editions
+  through `std::prelude` (e.g. `use std::prelude::rust_2021::*;`).][86294]
+
+Compiler
+--------
+- [Added tier 3\* support for `powerpc-unknown-freebsd`.][87370]
+- [Added tier 3 support for `powerpc64le-unknown-freebsd`.][83572]
+
+\* Refer to Rust's [platform support page][platform-support-doc] for more
+   information on Rust's tiered platform support.
+
+Libraries
+---------
+
+- [Updated std's float parsing to use the Eisel-Lemire algorithm.][86761]
+  These improvements should in general provide faster string parsing of floats,
+  no longer reject certain valid floating point values, and reduce
+  the produced code size for non-stripped artifacts.
+- [`string::Drain` now implements `AsRef<str>` and `AsRef<[u8]>`.][86858]
+- [`collections::{BinaryHeap, BTreeSet, HashSet, LinkedList, VecDeque}` now
+  implement `From<[T; N]>`.][84111]
+- [`collections::{BTreeMap, HashMap}` now implement `From<[(K, V); N]>`.][84111]
+  This allows you to write the following;
+  ```rust
+  let highscores = std::collections::HashMap::from([
+      ("Alice", 9000u32),
+      ("Bob", 7250),
+      ("Charlie", 5500),
+  ]);
+  ```
+
+Stabilised APIs
+---------------
+
+- [`Bound::cloned`]
+- [`Drain::as_str`]
+- [`IntoInnerError::into_error`]
+- [`IntoInnerError::into_parts`]
+- [`MaybeUninit::assume_init_mut`]
+- [`MaybeUninit::assume_init_ref`]
+- [`MaybeUninit::write`]
+- [`array::map`]
+- [`ops::ControlFlow`]
+- [`x86::_bittest`]
+- [`x86::_bittestandcomplement`]
+- [`x86::_bittestandreset`]
+- [`x86::_bittestandset`]
+- [`x86_64::_bittest64`]
+- [`x86_64::_bittestandcomplement64`]
+- [`x86_64::_bittestandreset64`]
+- [`x86_64::_bittestandset64`]
+
+The following previously stable functions are now `const`.
+
+- [`str::from_utf8_unchecked`]
+- [`mem::transmute`]
+
+
+Cargo
+-----
+- [Cargo will now deduplicate compiler diagnostics to the terminal when invoking
+  rustc in parallel such as when using `cargo test`.][cargo/9675]
+- [The package definition in `cargo metadata` now includes the `"default_run"`
+  field from the manifest.][cargo/9550]
+- [Added `cargo d` as an alias for `cargo doc`.][cargo/9680]
+- [Added `{lib}` as formatting option for `cargo tree` to print the `"lib_name"`
+  of packages.][cargo/9663]
+
+Rustdoc
+-------
+- [Added "Go to item on exact match" search option.][85876]
+- [The "Implementors" section on traits no longer shows redundant
+  method definitions.][85970]
+- [Trait implementations are toggled open by default.][86260] This should make the
+  implementations more searchable by tools like `CTRL+F` in your browser.
+- [Intra-doc links should now correctly resolve associated items (e.g. methods)
+  through type aliases.][86334]
+- [Traits which are marked with `#[doc(hidden)]` will no longer appear in the
+  "Trait Implementations" section.][86513]
+
+
+Compatibility Notes
+-------------------
+- [std functions that return an `io::Error` will no longer use the
+  `ErrorKind::Other` variant.][85746] This is to better reflect that these
+  kinds of errors could be categorised [into newer more specific `ErrorKind`
+  variants][79965], and that they do not represent a user error.
+- [Using environment variable names with `process::Command` on Windows now
+  behaves as expected.][85270] Previously using envionment variables with
+  `Command` would cause them to be ASCII-uppercased.
+- [Rustdoc will now warn on using rustdoc lints that aren't prefixed
+  with `rustdoc::`][86849]
+
+[86849]: https://github.com/rust-lang/rust/pull/86849
+[86513]: https://github.com/rust-lang/rust/pull/86513
+[86334]: https://github.com/rust-lang/rust/pull/86334
+[86260]: https://github.com/rust-lang/rust/pull/86260
+[85970]: https://github.com/rust-lang/rust/pull/85970
+[85876]: https://github.com/rust-lang/rust/pull/85876
+[83572]: https://github.com/rust-lang/rust/pull/83572
+[86294]: https://github.com/rust-lang/rust/pull/86294
+[86858]: https://github.com/rust-lang/rust/pull/86858
+[86761]: https://github.com/rust-lang/rust/pull/86761
+[85769]: https://github.com/rust-lang/rust/pull/85769
+[85746]: https://github.com/rust-lang/rust/pull/85746
+[85305]: https://github.com/rust-lang/rust/pull/85305
+[85270]: https://github.com/rust-lang/rust/pull/85270
+[84111]: https://github.com/rust-lang/rust/pull/84111
+[83918]: https://github.com/rust-lang/rust/pull/83918
+[79965]: https://github.com/rust-lang/rust/pull/79965
+[87370]: https://github.com/rust-lang/rust/pull/87370
+[87298]: https://github.com/rust-lang/rust/pull/87298
+[cargo/9663]: https://github.com/rust-lang/cargo/pull/9663
+[cargo/9675]: https://github.com/rust-lang/cargo/pull/9675
+[cargo/9550]: https://github.com/rust-lang/cargo/pull/9550
+[cargo/9680]: https://github.com/rust-lang/cargo/pull/9680
+[cargo/9663]: https://github.com/rust-lang/cargo/pull/9663
+[`array::map`]: https://doc.rust-lang.org/stable/std/primitive.array.html#method.map
+[`Bound::cloned`]: https://doc.rust-lang.org/stable/std/ops/enum.Bound.html#method.cloned
+[`Drain::as_str`]: https://doc.rust-lang.org/stable/std/string/struct.Drain.html#method.as_str
+[`IntoInnerError::into_error`]: https://doc.rust-lang.org/stable/std/io/struct.IntoInnerError.html#method.into_error
+[`IntoInnerError::into_parts`]: https://doc.rust-lang.org/stable/std/io/struct.IntoInnerError.html#method.into_parts
+[`MaybeUninit::assume_init_mut`]: https://doc.rust-lang.org/stable/std/mem/union.MaybeUninit.html#method.assume_init_mut
+[`MaybeUninit::assume_init_ref`]: https://doc.rust-lang.org/stable/std/mem/union.MaybeUninit.html#method.assume_init_ref
+[`MaybeUninit::write`]: https://doc.rust-lang.org/stable/std/mem/union.MaybeUninit.html#method.write
+[`Seek::rewind`]: https://doc.rust-lang.org/stable/std/io/trait.Seek.html#method.rewind
+[`mem::transmute`]: https://doc.rust-lang.org/stable/std/mem/fn.transmute.html
+[`ops::ControlFlow`]: https://doc.rust-lang.org/stable/std/ops/enum.ControlFlow.html
+[`str::from_utf8_unchecked`]: https://doc.rust-lang.org/stable/std/str/fn.from_utf8_unchecked.html
+[`x86::_bittest`]: https://doc.rust-lang.org/stable/core/arch/x86/fn._bittest.html
+[`x86::_bittestandcomplement`]: https://doc.rust-lang.org/stable/core/arch/x86/fn._bittestandcomplement.html
+[`x86::_bittestandreset`]: https://doc.rust-lang.org/stable/core/arch/x86/fn._bittestandreset.html
+[`x86::_bittestandset`]: https://doc.rust-lang.org/stable/core/arch/x86/fn._bittestandset.html
+[`x86_64::_bittest64`]: https://doc.rust-lang.org/stable/core/arch/x86_64/fn._bittest64.html
+[`x86_64::_bittestandcomplement64`]: https://doc.rust-lang.org/stable/core/arch/x86_64/fn._bittestandcomplement64.html
+[`x86_64::_bittestandreset64`]: https://doc.rust-lang.org/stable/core/arch/x86_64/fn._bittestandreset64.html
+[`x86_64::_bittestandset64`]: https://doc.rust-lang.org/stable/core/arch/x86_64/fn._bittestandset64.html
+
+
+Version 1.54.0 (2021-07-29)
+============================
+
+Language
+-----------------------
+
+- [You can now use macros for values in some built-in attributes.][83366]
+  This primarily allows you to call macros within the `#[doc]` attribute. For
+  example, to include external documentation in your crate, you can now write
+  the following:
+  ```rust
+  #![doc = include_str!("README.md")]
+  ```
+
+- [You can now cast between unsized slice types (and types which contain
+  unsized slices) in `const fn`.][85078]
+- [You can now use multiple generic lifetimes with `impl Trait` where the
+   lifetimes don't explicitly outlive another.][84701] In code this means
+   that you can now have `impl Trait<'a, 'b>` where as before you could
+   only have `impl Trait<'a, 'b> where 'b: 'a`.
+
+Compiler
+-----------------------
+
+- [Rustc will now search for custom JSON targets in
+  `/lib/rustlib/<target-triple>/target.json` where `/` is the "sysroot"
+  directory.][83800] You can find your sysroot directory by running
+  `rustc --print sysroot`.
+- [Added `wasm` as a `target_family` for WebAssembly platforms.][84072]
+- [You can now use `#[target_feature]` on safe functions when targeting
+  WebAssembly platforms.][84988]
+- [Improved debugger output for enums on Windows MSVC platforms.][85292]
+- [Added tier 3\* support for `bpfel-unknown-none`
+   and `bpfeb-unknown-none`.][79608]
+- [`-Zmutable-noalias=yes`][82834] is enabled by default when using LLVM 12 or above.
+
+\* Refer to Rust's [platform support page][platform-support-doc] for more
+   information on Rust's tiered platform support.
+
+Libraries
+-----------------------
+
+- [`panic::panic_any` will now `#[track_caller]`.][85745]
+- [Added `OutOfMemory` as a variant of `io::ErrorKind`.][84744]
+- [ `proc_macro::Literal` now implements `FromStr`.][84717]
+- [The implementations of vendor intrinsics in core::arch have been
+   significantly refactored.][83278] The main user-visible changes are
+   a 50% reduction in the size of libcore.rlib and stricter validation
+   of constant operands passed to intrinsics. The latter is technically
+   a breaking change, but allows Rust to more closely match the C vendor
+   intrinsics API.
+
+Stabilized APIs
+---------------
+
+- [`BTreeMap::into_keys`]
+- [`BTreeMap::into_values`]
+- [`HashMap::into_keys`]
+- [`HashMap::into_values`]
+- [`arch::wasm32`]
+- [`VecDeque::binary_search`]
+- [`VecDeque::binary_search_by`]
+- [`VecDeque::binary_search_by_key`]
+- [`VecDeque::partition_point`]
+
+Cargo
+-----
+
+- [Added the `--prune <spec>` option to `cargo-tree` to remove a package from
+  the dependency graph.][cargo/9520]
+- [Added the `--depth` option to `cargo-tree` to print only to a certain depth
+  in the tree ][cargo/9499]
+- [Added the `no-proc-macro` value to `cargo-tree --edges` to hide procedural
+  macro dependencies.][cargo/9488]
+- [A new environment variable named `CARGO_TARGET_TMPDIR` is available.][cargo/9375]
+  This variable points to a directory that integration tests and benches
+  can use as a "scratchpad" for testing filesystem operations.
+
+Compatibility Notes
+-------------------
+- [Mixing Option and Result via `?` is no longer permitted in closures for inferred types.][86831]
+- [Previously unsound code is no longer permitted where different constructors in branches
+  could require different lifetimes.][85574]
+- As previously mentioned the [`std::arch` instrinsics now uses stricter const checking][83278]
+  than before and may reject some previously accepted code.
+- [`i128` multiplication on Cortex M0+ platforms currently unconditionally causes overflow
+   when compiled with `codegen-units = 1`.][86063]
+
+[85574]: https://github.com/rust-lang/rust/issues/85574
+[86831]: https://github.com/rust-lang/rust/issues/86831
+[86063]: https://github.com/rust-lang/rust/issues/86063
+[86831]: https://github.com/rust-lang/rust/issues/86831
+[79608]: https://github.com/rust-lang/rust/pull/79608
+[84988]: https://github.com/rust-lang/rust/pull/84988
+[84701]: https://github.com/rust-lang/rust/pull/84701
+[84072]: https://github.com/rust-lang/rust/pull/84072
+[85745]: https://github.com/rust-lang/rust/pull/85745
+[84744]: https://github.com/rust-lang/rust/pull/84744
+[85078]: https://github.com/rust-lang/rust/pull/85078
+[84717]: https://github.com/rust-lang/rust/pull/84717
+[83800]: https://github.com/rust-lang/rust/pull/83800
+[83366]: https://github.com/rust-lang/rust/pull/83366
+[83278]: https://github.com/rust-lang/rust/pull/83278
+[85292]: https://github.com/rust-lang/rust/pull/85292
+[82834]: https://github.com/rust-lang/rust/pull/82834
+[cargo/9520]: https://github.com/rust-lang/cargo/pull/9520
+[cargo/9499]: https://github.com/rust-lang/cargo/pull/9499
+[cargo/9488]: https://github.com/rust-lang/cargo/pull/9488
+[cargo/9375]: https://github.com/rust-lang/cargo/pull/9375
+[`BTreeMap::into_keys`]: https://doc.rust-lang.org/std/collections/struct.BTreeMap.html#method.into_keys
+[`BTreeMap::into_values`]: https://doc.rust-lang.org/std/collections/struct.BTreeMap.html#method.into_values
+[`HashMap::into_keys`]: https://doc.rust-lang.org/std/collections/struct.HashMap.html#method.into_keys
+[`HashMap::into_values`]: https://doc.rust-lang.org/std/collections/struct.HashMap.html#method.into_values
+[`arch::wasm32`]: https://doc.rust-lang.org/core/arch/wasm32/index.html
+[`VecDeque::binary_search`]: https://doc.rust-lang.org/std/collections/struct.VecDeque.html#method.binary_search
+[`VecDeque::binary_search_by`]: https://doc.rust-lang.org/std/collections/struct.VecDeque.html#method.binary_search_by
+
+[`VecDeque::binary_search_by_key`]: https://doc.rust-lang.org/std/collections/struct.VecDeque.html#method.binary_search_by_key
+
+[`VecDeque::partition_point`]: https://doc.rust-lang.org/std/collections/struct.VecDeque.html#method.partition_point
+
 Version 1.53.0 (2021-06-17)
 ============================
 
@@ -44,7 +311,7 @@ Libraries
 - [`leading_zeros`, and `trailing_zeros` are now available on all
   `NonZero` integer types.][84082]
 - [`{f32, f64}::from_str` now parse and print special values
-  (`NaN`, `-0`) according to IEEE RFC 754.][78618]
+  (`NaN`, `-0`) according to IEEE 754.][78618]
 - [You can now index into slices using `(Bound<usize>, Bound<usize>)`.][77704]
 - [Add the `BITS` associated constant to all numeric types.][82565]
 
@@ -1749,7 +2016,7 @@ Language
 - [You can now use `#[repr(transparent)]` on univariant `enum`s.][68122] Meaning
   that you can create an enum that has the exact layout and ABI of the type
   it contains.
-- [You can now use outer attribute procedural macros on inline modules.][64273]  
+- [You can now use outer attribute procedural macros on inline modules.][64273]
 - [There are some *syntax-only* changes:][67131]
    - `default` is syntactically allowed before items in `trait` definitions.
    - Items in `impl`s (i.e. `const`s, `type`s, and `fn`s) may syntactically

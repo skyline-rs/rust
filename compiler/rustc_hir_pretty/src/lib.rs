@@ -103,6 +103,7 @@ impl<'a> State<'a> {
             Node::TraitRef(a) => self.print_trait_ref(&a),
             Node::Binding(a) | Node::Pat(a) => self.print_pat(&a),
             Node::Arm(a) => self.print_arm(&a),
+            Node::Infer(_) => self.s.word("_"),
             Node::Block(a) => {
                 // Containing cbox, will be closed by print-block at `}`.
                 self.cbox(INDENT_UNIT);
@@ -119,7 +120,6 @@ impl<'a> State<'a> {
             // printing.
             Node::Ctor(..) => panic!("cannot print isolated Ctor"),
             Node::Local(a) => self.print_local_decl(&a),
-            Node::MacroDef(_) => panic!("cannot print MacroDef"),
             Node::Crate(..) => panic!("cannot print Crate"),
         }
     }
@@ -169,7 +169,7 @@ pub fn print_crate<'a>(
     // When printing the AST, we sometimes need to inject `#[no_std]` here.
     // Since you can't compile the HIR, it's not necessary.
 
-    s.print_mod(&krate.item, s.attrs(hir::CRATE_HIR_ID));
+    s.print_mod(&krate.module(), s.attrs(hir::CRATE_HIR_ID));
     s.print_remaining_comments();
     s.s.eof()
 }
@@ -437,13 +437,13 @@ impl<'a> State<'a> {
                 self.print_anon_const(e);
                 self.s.word(")");
             }
-            hir::TyKind::Infer => {
-                self.s.word("_");
-            }
             hir::TyKind::Err => {
                 self.popen();
                 self.s.word("/*ERROR*/");
                 self.pclose();
+            }
+            hir::TyKind::Infer => {
+                self.s.word("_");
             }
         }
         self.end()
@@ -640,6 +640,11 @@ impl<'a> State<'a> {
                 self.end(); // need to close a box
                 self.end(); // need to close a box
                 self.ann.nested(self, Nested::Body(body));
+            }
+            hir::ItemKind::Macro(ref macro_def) => {
+                self.print_mac_def(macro_def, &item.ident, &item.span, |state| {
+                    state.print_visibility(&item.vis)
+                });
             }
             hir::ItemKind::Mod(ref _mod) => {
                 self.head(visibility_qualified(&item.vis, "mod"));
@@ -1091,53 +1096,30 @@ impl<'a> State<'a> {
     }
 
     fn print_else(&mut self, els: Option<&hir::Expr<'_>>) {
-        match els {
-            Some(else_) => {
-                match else_.kind {
-                    // "another else-if"
-                    hir::ExprKind::If(ref i, ref then, ref e) => {
-                        self.cbox(INDENT_UNIT - 1);
-                        self.ibox(0);
-                        self.s.word(" else if ");
-                        self.print_expr_as_cond(&i);
-                        self.s.space();
-                        self.print_expr(&then);
-                        self.print_else(e.as_ref().map(|e| &**e))
-                    }
-                    // "final else"
-                    hir::ExprKind::Block(ref b, _) => {
-                        self.cbox(INDENT_UNIT - 1);
-                        self.ibox(0);
-                        self.s.word(" else ");
-                        self.print_block(&b)
-                    }
-                    hir::ExprKind::Match(ref expr, arms, _) => {
-                        // else if let desugared to match
-                        assert!(arms.len() == 2, "if let desugars to match with two arms");
-
-                        self.s.word(" else ");
-                        self.s.word("{");
-
-                        self.cbox(INDENT_UNIT);
-                        self.ibox(INDENT_UNIT);
-                        self.word_nbsp("match");
-                        self.print_expr_as_cond(&expr);
-                        self.s.space();
-                        self.bopen();
-                        for arm in arms {
-                            self.print_arm(arm);
-                        }
-                        self.bclose(expr.span);
-
-                        self.s.word("}");
-                    }
-                    // BLEAH, constraints would be great here
-                    _ => {
-                        panic!("print_if saw if with weird alternative");
-                    }
+        if let Some(els_inner) = els {
+            match els_inner.kind {
+                // Another `else if` block.
+                hir::ExprKind::If(ref i, ref then, ref e) => {
+                    self.cbox(INDENT_UNIT - 1);
+                    self.ibox(0);
+                    self.s.word(" else if ");
+                    self.print_expr_as_cond(&i);
+                    self.s.space();
+                    self.print_expr(&then);
+                    self.print_else(e.as_ref().map(|e| &**e))
+                }
+                // Final `else` block.
+                hir::ExprKind::Block(ref b, _) => {
+                    self.cbox(INDENT_UNIT - 1);
+                    self.ibox(0);
+                    self.s.word(" else ");
+                    self.print_block(&b)
+                }
+                // Constraints would be great here!
+                _ => {
+                    panic!("print_if saw if with weird alternative");
                 }
             }
-            _ => {}
         }
     }
 
@@ -1164,34 +1146,49 @@ impl<'a> State<'a> {
         self.pclose()
     }
 
-    pub fn print_expr_maybe_paren(&mut self, expr: &hir::Expr<'_>, prec: i8) {
-        let needs_par = expr.precedence().order() < prec;
+    fn print_expr_maybe_paren(&mut self, expr: &hir::Expr<'_>, prec: i8) {
+        self.print_expr_cond_paren(expr, expr.precedence().order() < prec)
+    }
+
+    /// Prints an expr using syntax that's acceptable in a condition position, such as the `cond` in
+    /// `if cond { ... }`.
+    pub fn print_expr_as_cond(&mut self, expr: &hir::Expr<'_>) {
+        self.print_expr_cond_paren(expr, Self::cond_needs_par(expr))
+    }
+
+    /// Prints `expr` or `(expr)` when `needs_par` holds.
+    fn print_expr_cond_paren(&mut self, expr: &hir::Expr<'_>, needs_par: bool) {
         if needs_par {
             self.popen();
         }
-        self.print_expr(expr);
+        if let hir::ExprKind::DropTemps(ref actual_expr) = expr.kind {
+            self.print_expr(actual_expr);
+        } else {
+            self.print_expr(expr);
+        }
         if needs_par {
             self.pclose();
         }
     }
 
-    /// Print an expr using syntax that's acceptable in a condition position, such as the `cond` in
-    /// `if cond { ... }`.
-    pub fn print_expr_as_cond(&mut self, expr: &hir::Expr<'_>) {
-        let needs_par = match expr.kind {
-            // These cases need parens due to the parse error observed in #26461: `if return {}`
-            // parses as the erroneous construct `if (return {})`, not `if (return) {}`.
-            hir::ExprKind::Closure(..) | hir::ExprKind::Ret(..) | hir::ExprKind::Break(..) => true,
+    /// Print a `let pat = expr` expression.
+    fn print_let(&mut self, pat: &hir::Pat<'_>, expr: &hir::Expr<'_>) {
+        self.s.word("let ");
+        self.print_pat(pat);
+        self.s.space();
+        self.word_space("=");
+        let npals = || parser::needs_par_as_let_scrutinee(expr.precedence().order());
+        self.print_expr_cond_paren(expr, Self::cond_needs_par(expr) || npals())
+    }
 
+    // Does `expr` need parenthesis when printed in a condition position?
+    //
+    // These cases need parens due to the parse error observed in #26461: `if return {}`
+    // parses as the erroneous construct `if (return {})`, not `if (return) {}`.
+    fn cond_needs_par(expr: &hir::Expr<'_>) -> bool {
+        match expr.kind {
+            hir::ExprKind::Break(..) | hir::ExprKind::Closure(..) | hir::ExprKind::Ret(..) => true,
             _ => contains_exterior_struct_lit(expr),
-        };
-
-        if needs_par {
-            self.popen();
-        }
-        self.print_expr(expr);
-        if needs_par {
-            self.pclose();
         }
     }
 
@@ -1313,6 +1310,9 @@ impl<'a> State<'a> {
             (&hir::ExprKind::Cast { .. }, hir::BinOpKind::Lt | hir::BinOpKind::Shl) => {
                 parser::PREC_FORCE_PAREN
             }
+            (&hir::ExprKind::Let { .. }, _) if !parser::needs_par_as_let_scrutinee(prec) => {
+                parser::PREC_FORCE_PAREN
+            }
             _ => left_prec,
         };
 
@@ -1356,8 +1356,8 @@ impl<'a> State<'a> {
             Options(ast::InlineAsmOptions),
         }
 
-        let mut args = vec![];
-        args.push(AsmArg::Template(ast::InlineAsmTemplatePiece::to_string(&asm.template)));
+        let mut args =
+            vec![AsmArg::Template(ast::InlineAsmTemplatePiece::to_string(&asm.template))];
         args.extend(asm.operands.iter().map(|(o, _)| AsmArg::Operand(o)));
         if !asm.options.is_empty() {
             args.push(AsmArg::Options(asm.options));
@@ -1530,6 +1530,9 @@ impl<'a> State<'a> {
                 // Print `}`:
                 self.bclose_maybe_open(expr.span, true);
             }
+            hir::ExprKind::Let(ref pat, ref scrutinee, _) => {
+                self.print_let(pat, scrutinee);
+            }
             hir::ExprKind::If(ref test, ref blk, ref elseopt) => {
                 self.print_if(&test, &blk, elseopt.as_ref().map(|e| &**e));
             }
@@ -1539,7 +1542,6 @@ impl<'a> State<'a> {
                     self.word_space(":");
                 }
                 self.head("loop");
-                self.s.space();
                 self.print_block(&blk);
             }
             hir::ExprKind::Match(ref expr, arms, _) => {
@@ -1852,6 +1854,7 @@ impl<'a> State<'a> {
                         GenericArg::Lifetime(_) => {}
                         GenericArg::Type(ty) => s.print_type(ty),
                         GenericArg::Const(ct) => s.print_anon_const(&ct.value),
+                        GenericArg::Infer(_inf) => s.word("_"),
                     },
                 );
             }
@@ -2228,6 +2231,9 @@ impl<'a> State<'a> {
                 }
                 GenericBound::Outlives(lt) => {
                     self.print_lifetime(lt);
+                }
+                GenericBound::Unsized(_) => {
+                    self.s.word("?Sized");
                 }
             }
         }

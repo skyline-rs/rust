@@ -178,7 +178,7 @@ declare_features! (
     /// Allows annotating functions conforming to `fn(&PanicInfo) -> !` with `#[panic_handler]`.
     /// This defines the behavior of panics.
     (accepted, panic_handler, "1.30.0", Some(44489), None),
-    /// Allows `#[used]` to preserve symbols (see llvm.used).
+    /// Allows `#[used]` to preserve symbols (see llvm.compiler.used).
     (accepted, used, "1.30.0", Some(40289), None),
     /// Allows `crate` in paths.
     (accepted, crate_in_paths, "1.30.0", Some(45477), None),
@@ -287,6 +287,15 @@ declare_features! (
     (accepted, const_fn_unsize, "1.54.0", Some(64992), None),
     /// Allows `impl Trait` with multiple unrelated lifetimes.
     (accepted, member_constraints, "1.54.0", Some(61997), None),
+    /// Allows bindings in the subpattern of a binding pattern.
+    /// For example, you can write `x @ Some(y)`.
+    (accepted, bindings_after_at, "1.54.0", Some(65490), None),
+    /// Allows calling `transmute` in const fn
+    (accepted, const_fn_transmute, "1.56.0", Some(53605), None),
+    /// Allows accessing fields of unions inside `const` functions.
+    (accepted, const_fn_union, "1.56.0", Some(51909), None),
+    /// Allows explicit discriminants on non-unit enum variants.
+    (accepted, arbitrary_enum_discriminant, "1.56.0", Some(60553), None),
 
     // -------------------------------------------------------------------------
     // feature-group-end: accepted features

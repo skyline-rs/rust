@@ -409,7 +409,7 @@ impl<K, V> NodeRef<marker::Dying, K, V, marker::LeafOrInternal> {
 
 impl<'a, K, V, Type> NodeRef<marker::Mut<'a>, K, V, Type> {
     /// Temporarily takes out another mutable reference to the same node. Beware, as
-    /// this method is very dangerous, doubly so since it may not immediately appear
+    /// this method is very dangerous, doubly so since it might not immediately appear
     /// dangerous.
     ///
     /// Because mutable pointers can roam anywhere around the tree, the returned
@@ -777,7 +777,7 @@ impl<BorrowType, K, V, NodeType, HandleType>
 
 impl<'a, K, V, NodeType, HandleType> Handle<NodeRef<marker::Mut<'a>, K, V, NodeType>, HandleType> {
     /// Temporarily takes out another mutable handle on the same location. Beware, as
-    /// this method is very dangerous, doubly so since it may not immediately appear
+    /// this method is very dangerous, doubly so since it might not immediately appear
     /// dangerous.
     ///
     /// For details, see `NodeRef::reborrow_mut`.
@@ -1058,7 +1058,9 @@ impl<'a, K: 'a, V: 'a, NodeType> Handle<NodeRef<marker::Mut<'a>, K, V, NodeType>
 
 impl<K, V, NodeType> Handle<NodeRef<marker::Dying, K, V, NodeType>, marker::KV> {
     /// Extracts the key and value that the KV handle refers to.
-    pub fn into_key_val(mut self) -> (K, V) {
+    /// # Safety
+    /// The node that the handle refers to must not yet have been deallocated.
+    pub unsafe fn into_key_val(mut self) -> (K, V) {
         debug_assert!(self.idx < self.node.len());
         let leaf = self.node.as_leaf_dying();
         unsafe {
@@ -1069,8 +1071,10 @@ impl<K, V, NodeType> Handle<NodeRef<marker::Dying, K, V, NodeType>, marker::KV> 
     }
 
     /// Drops the key and value that the KV handle refers to.
+    /// # Safety
+    /// The node that the handle refers to must not yet have been deallocated.
     #[inline]
-    pub fn drop_key_val(mut self) {
+    pub unsafe fn drop_key_val(mut self) {
         debug_assert!(self.idx < self.node.len());
         let leaf = self.node.as_leaf_dying();
         unsafe {

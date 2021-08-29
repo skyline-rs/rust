@@ -15,15 +15,13 @@ use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::sym;
 
 declare_clippy_lint! {
-    /// **What it does:**
+    /// ### What it does
     /// Finds patterns that reimplement `Option::unwrap_or` or `Result::unwrap_or`.
     ///
-    /// **Why is this bad?**
+    /// ### Why is this bad?
     /// Concise code helps focusing on behavior instead of boilerplate.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// let foo: Option<i32> = None;
     /// match foo {
@@ -61,13 +59,13 @@ fn lint_manual_unwrap_or<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
             if let Some((idx, or_arm)) = arms.iter().enumerate().find(|(_, arm)| {
                 match arm.pat.kind {
                     PatKind::Path(ref qpath) => is_lang_ctor(cx, qpath, OptionNone),
-                    PatKind::TupleStruct(ref qpath, &[pat], _) =>
+                    PatKind::TupleStruct(ref qpath, [pat], _) =>
                         matches!(pat.kind, PatKind::Wild) && is_lang_ctor(cx, qpath, ResultErr),
                     _ => false,
                 }
             });
             let unwrap_arm = &arms[1 - idx];
-            if let PatKind::TupleStruct(ref qpath, &[unwrap_pat], _) = unwrap_arm.pat.kind;
+            if let PatKind::TupleStruct(ref qpath, [unwrap_pat], _) = unwrap_arm.pat.kind;
             if is_lang_ctor(cx, qpath, OptionSome) || is_lang_ctor(cx, qpath, ResultOk);
             if let PatKind::Binding(_, binding_hir_id, ..) = unwrap_pat.kind;
             if path_to_local_id(unwrap_arm.body, binding_hir_id);

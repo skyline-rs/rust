@@ -8,10 +8,9 @@ Rust MIR: a lowered representation of Rust.
 #![feature(in_band_lifetimes)]
 #![feature(array_windows)]
 #![feature(assert_matches)]
-#![feature(bindings_after_at)]
+#![cfg_attr(bootstrap, feature(bindings_after_at))]
 #![feature(bool_to_option)]
 #![feature(box_patterns)]
-#![feature(box_syntax)]
 #![feature(crate_visibility_modifier)]
 #![feature(decl_macro)]
 #![feature(exact_size_is_empty)]
@@ -29,6 +28,8 @@ Rust MIR: a lowered representation of Rust.
 #![feature(option_get_or_insert_default)]
 #![feature(once_cell)]
 #![feature(control_flow_enum)]
+#![feature(try_reserve)]
+#![feature(try_reserve_kind)]
 #![recursion_limit = "256"]
 
 #[macro_use]
@@ -44,6 +45,9 @@ pub mod monomorphize;
 mod shim;
 pub mod transform;
 pub mod util;
+
+// A public API provided for the Rust compiler consumers.
+pub use self::borrow_check::consumers;
 
 use rustc_middle::ty::query::Providers;
 

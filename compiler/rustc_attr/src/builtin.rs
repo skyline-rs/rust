@@ -87,50 +87,6 @@ pub enum OptimizeAttr {
     Size,
 }
 
-#[derive(Copy, Clone, PartialEq)]
-pub enum UnwindAttr {
-    Allowed,
-    Aborts,
-}
-
-/// Determine what `#[unwind]` attribute is present in `attrs`, if any.
-pub fn find_unwind_attr(sess: &Session, attrs: &[Attribute]) -> Option<UnwindAttr> {
-    attrs.iter().fold(None, |ia, attr| {
-        if sess.check_name(attr, sym::unwind) {
-            if let Some(meta) = attr.meta() {
-                if let MetaItemKind::List(items) = meta.kind {
-                    if items.len() == 1 {
-                        if items[0].has_name(sym::allowed) {
-                            return Some(UnwindAttr::Allowed);
-                        } else if items[0].has_name(sym::aborts) {
-                            return Some(UnwindAttr::Aborts);
-                        }
-                    }
-
-                    struct_span_err!(
-                        sess.diagnostic(),
-                        attr.span,
-                        E0633,
-                        "malformed `unwind` attribute input"
-                    )
-                    .span_label(attr.span, "invalid argument")
-                    .span_suggestions(
-                        attr.span,
-                        "the allowed arguments are `allowed` and `aborts`",
-                        (vec!["allowed", "aborts"])
-                            .into_iter()
-                            .map(|s| format!("#[unwind({})]", s)),
-                        Applicability::MachineApplicable,
-                    )
-                    .emit();
-                }
-            }
-        }
-
-        ia
-    })
-}
-
 /// Represents the following attributes:
 ///
 /// - `#[stable]`
@@ -209,8 +165,6 @@ where
         {
             continue; // not a stability level
         }
-
-        sess.mark_attr_used(attr);
 
         let meta = attr.meta();
 
@@ -680,8 +634,7 @@ where
     let diagnostic = &sess.parse_sess.span_diagnostic;
 
     'outer: for attr in attrs_iter {
-        if !(sess.check_name(attr, sym::deprecated) || sess.check_name(attr, sym::rustc_deprecated))
-        {
+        if !(attr.has_name(sym::deprecated) || attr.has_name(sym::rustc_deprecated)) {
             continue;
         }
 
@@ -744,17 +697,17 @@ where
                                     continue 'outer;
                                 }
                             }
-                            sym::note if sess.check_name(attr, sym::deprecated) => {
+                            sym::note if attr.has_name(sym::deprecated) => {
                                 if !get(mi, &mut note) {
                                     continue 'outer;
                                 }
                             }
-                            sym::reason if sess.check_name(attr, sym::rustc_deprecated) => {
+                            sym::reason if attr.has_name(sym::rustc_deprecated) => {
                                 if !get(mi, &mut note) {
                                     continue 'outer;
                                 }
                             }
-                            sym::suggestion if sess.check_name(attr, sym::rustc_deprecated) => {
+                            sym::suggestion if attr.has_name(sym::rustc_deprecated) => {
                                 if !get(mi, &mut suggestion) {
                                     continue 'outer;
                                 }
@@ -765,7 +718,7 @@ where
                                     meta.span(),
                                     AttrError::UnknownMetaItem(
                                         pprust::path_to_string(&mi.path),
-                                        if sess.check_name(attr, sym::deprecated) {
+                                        if attr.has_name(sym::deprecated) {
                                             &["since", "note"]
                                         } else {
                                             &["since", "reason", "suggestion"]
@@ -791,11 +744,11 @@ where
             }
         }
 
-        if suggestion.is_some() && sess.check_name(attr, sym::deprecated) {
+        if suggestion.is_some() && attr.has_name(sym::deprecated) {
             unreachable!("only allowed on rustc_deprecated")
         }
 
-        if sess.check_name(attr, sym::rustc_deprecated) {
+        if attr.has_name(sym::rustc_deprecated) {
             if since.is_none() {
                 handle_errors(&sess.parse_sess, attr.span, AttrError::MissingSince);
                 continue;
@@ -807,9 +760,7 @@ where
             }
         }
 
-        sess.mark_attr_used(&attr);
-
-        let is_since_rustc_version = sess.check_name(attr, sym::rustc_deprecated);
+        let is_since_rustc_version = attr.has_name(sym::rustc_deprecated);
         depr = Some((Deprecation { since, note, suggestion, is_since_rustc_version }, attr.span));
     }
 
@@ -860,7 +811,6 @@ pub fn find_repr_attrs(sess: &Session, attr: &Attribute) -> Vec<ReprAttr> {
     let diagnostic = &sess.parse_sess.span_diagnostic;
     if attr.has_name(sym::repr) {
         if let Some(items) = attr.meta_item_list() {
-            sess.mark_attr_used(attr);
             for item in items {
                 let mut recognised = false;
                 if item.is_word() {
@@ -870,6 +820,23 @@ pub fn find_repr_attrs(sess: &Session, attr: &Attribute) -> Vec<ReprAttr> {
                         sym::simd => Some(ReprSimd),
                         sym::transparent => Some(ReprTransparent),
                         sym::no_niche => Some(ReprNoNiche),
+                        sym::align => {
+                            let mut err = struct_span_err!(
+                                diagnostic,
+                                item.span(),
+                                E0589,
+                                "invalid `repr(align)` attribute: `align` needs an argument"
+                            );
+                            err.span_suggestion(
+                                item.span(),
+                                "supply an argument here",
+                                "align(...)".to_string(),
+                                Applicability::HasPlaceholders,
+                            );
+                            err.emit();
+                            recognised = true;
+                            None
+                        }
                         name => int_type_of_word(name).map(ReprInt),
                     };
 
@@ -891,33 +858,47 @@ pub fn find_repr_attrs(sess: &Session, attr: &Attribute) -> Vec<ReprAttr> {
                             Ok(literal) => acc.push(ReprPacked(literal)),
                             Err(message) => literal_error = Some(message),
                         };
+                    } else if matches!(name, sym::C | sym::simd | sym::transparent | sym::no_niche)
+                        || int_type_of_word(name).is_some()
+                    {
+                        recognised = true;
+                        struct_span_err!(
+                                diagnostic,
+                                item.span(),
+                                E0552,
+                                "invalid representation hint: `{}` does not take a parenthesized argument list",
+                                name.to_ident_string(),
+                            ).emit();
                     }
                     if let Some(literal_error) = literal_error {
                         struct_span_err!(
                             diagnostic,
                             item.span(),
                             E0589,
-                            "invalid `repr(align)` attribute: {}",
+                            "invalid `repr({})` attribute: {}",
+                            name.to_ident_string(),
                             literal_error
                         )
                         .emit();
                     }
                 } else if let Some(meta_item) = item.meta_item() {
-                    if meta_item.has_name(sym::align) {
-                        if let MetaItemKind::NameValue(ref value) = meta_item.kind {
+                    if let MetaItemKind::NameValue(ref value) = meta_item.kind {
+                        if meta_item.has_name(sym::align) || meta_item.has_name(sym::packed) {
+                            let name = meta_item.name_or_empty().to_ident_string();
                             recognised = true;
                             let mut err = struct_span_err!(
                                 diagnostic,
                                 item.span(),
                                 E0693,
-                                "incorrect `repr(align)` attribute format"
+                                "incorrect `repr({})` attribute format",
+                                name,
                             );
                             match value.kind {
                                 ast::LitKind::Int(int, ast::LitIntType::Unsuffixed) => {
                                     err.span_suggestion(
                                         item.span(),
                                         "use parentheses instead",
-                                        format!("align({})", int),
+                                        format!("{}({})", name, int),
                                         Applicability::MachineApplicable,
                                     );
                                 }
@@ -925,19 +906,76 @@ pub fn find_repr_attrs(sess: &Session, attr: &Attribute) -> Vec<ReprAttr> {
                                     err.span_suggestion(
                                         item.span(),
                                         "use parentheses instead",
-                                        format!("align({})", s),
+                                        format!("{}({})", name, s),
                                         Applicability::MachineApplicable,
                                     );
                                 }
                                 _ => {}
                             }
                             err.emit();
+                        } else {
+                            if matches!(
+                                meta_item.name_or_empty(),
+                                sym::C | sym::simd | sym::transparent | sym::no_niche
+                            ) || int_type_of_word(meta_item.name_or_empty()).is_some()
+                            {
+                                recognised = true;
+                                struct_span_err!(
+                                    diagnostic,
+                                    meta_item.span,
+                                    E0552,
+                                    "invalid representation hint: `{}` does not take a value",
+                                    meta_item.name_or_empty().to_ident_string(),
+                                )
+                                .emit();
+                            }
+                        }
+                    } else if let MetaItemKind::List(_) = meta_item.kind {
+                        if meta_item.has_name(sym::align) {
+                            recognised = true;
+                            struct_span_err!(
+                                diagnostic,
+                                meta_item.span,
+                                E0693,
+                                "incorrect `repr(align)` attribute format: \
+                                 `align` takes exactly one argument in parentheses"
+                            )
+                            .emit();
+                        } else if meta_item.has_name(sym::packed) {
+                            recognised = true;
+                            struct_span_err!(
+                                diagnostic,
+                                meta_item.span,
+                                E0552,
+                                "incorrect `repr(packed)` attribute format: \
+                                 `packed` takes exactly one parenthesized argument, \
+                                 or no parentheses at all"
+                            )
+                            .emit();
+                        } else if matches!(
+                            meta_item.name_or_empty(),
+                            sym::C | sym::simd | sym::transparent | sym::no_niche
+                        ) || int_type_of_word(meta_item.name_or_empty()).is_some()
+                        {
+                            recognised = true;
+                            struct_span_err!(
+                                diagnostic,
+                                meta_item.span,
+                                E0552,
+                                "invalid representation hint: `{}` does not take a parenthesized argument list",
+                                meta_item.name_or_empty().to_ident_string(),
+                            ).emit();
                         }
                     }
                 }
                 if !recognised {
-                    // Not a word we recognize
-                    diagnostic.delay_span_bug(item.span(), "unrecognized representation hint");
+                    // Not a word we recognize. This will be caught and reported by
+                    // the `check_mod_attrs` pass, but this pass doesn't always run
+                    // (e.g. if we only pretty-print the source), so we have to gate
+                    // the `delay_span_bug` call as follows:
+                    if sess.opts.pretty.map_or(true, |pp| pp.needs_analysis()) {
+                        diagnostic.delay_span_bug(item.span(), "unrecognized representation hint");
+                    }
                 }
             }
         }
@@ -971,14 +1009,13 @@ pub enum TransparencyError {
 }
 
 pub fn find_transparency(
-    sess: &Session,
     attrs: &[Attribute],
     macro_rules: bool,
 ) -> (Transparency, Option<TransparencyError>) {
     let mut transparency = None;
     let mut error = None;
     for attr in attrs {
-        if sess.check_name(attr, sym::rustc_macro_transparency) {
+        if attr.has_name(sym::rustc_macro_transparency) {
             if let Some((_, old_span)) = transparency {
                 error = Some(TransparencyError::MultipleTransparencyAttrs(old_span, attr.span));
                 break;

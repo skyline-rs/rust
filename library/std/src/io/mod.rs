@@ -264,6 +264,8 @@ use crate::sys_common::memchr;
 
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use self::buffered::IntoInnerError;
+#[stable(feature = "bufwriter_into_parts", since = "1.56.0")]
+pub use self::buffered::WriterPanicked;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use self::buffered::{BufReader, BufWriter, LineWriter};
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -277,6 +279,8 @@ pub use self::error::{Error, ErrorKind, Result};
 pub use self::stdio::set_output_capture;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use self::stdio::{stderr, stdin, stdout, Stderr, Stdin, Stdout};
+#[unstable(feature = "stdio_locked", issue = "86845")]
+pub use self::stdio::{stderr_locked, stdin_locked, stdout_locked};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use self::stdio::{StderrLock, StdinLock, StdoutLock};
 #[unstable(feature = "print_internals", issue = "none")]
@@ -512,6 +516,7 @@ pub(crate) fn default_read_exact<R: Read + ?Sized>(this: &mut R, mut buf: &mut [
 /// [`File`]: crate::fs::File
 #[stable(feature = "rust1", since = "1.0.0")]
 #[doc(notable_trait)]
+#[cfg_attr(not(test), rustc_diagnostic_item = "IoRead")]
 pub trait Read {
     /// Pull some bytes from this source into the specified buffer, returning
     /// how many bytes were read.
@@ -550,7 +555,7 @@ pub trait Read {
     /// contents of `buf` being true. It is recommended that *implementations*
     /// only write data to `buf` instead of reading its contents.
     ///
-    /// Correspondingly, however, *callers* of this method may not assume any guarantees
+    /// Correspondingly, however, *callers* of this method must not assume any guarantees
     /// about how the implementation uses `buf`. The trait is safe to implement,
     /// so it is possible that the code that's supposed to write to the buffer might also read
     /// from it. It is your responsibility to make sure that `buf` is initialized
@@ -805,9 +810,9 @@ pub trait Read {
         default_read_exact(self, buf)
     }
 
-    /// Creates a "by reference" adaptor for this instance of `Read`.
+    /// Creates a "by reference" adapter for this instance of `Read`.
     ///
-    /// The returned adaptor also implements `Read` and will simply borrow this
+    /// The returned adapter also implements `Read` and will simply borrow this
     /// current reader.
     ///
     /// # Examples
@@ -884,7 +889,7 @@ pub trait Read {
         Bytes { inner: self }
     }
 
-    /// Creates an adaptor which will chain this stream with another.
+    /// Creates an adapter which will chain this stream with another.
     ///
     /// The returned `Read` instance will first read all bytes from this object
     /// until EOF is encountered. Afterwards the output is equivalent to the
@@ -922,7 +927,7 @@ pub trait Read {
         Chain { first: self, second: next, done_first: false }
     }
 
-    /// Creates an adaptor which will read at most `limit` bytes from it.
+    /// Creates an adapter which will read at most `limit` bytes from it.
     ///
     /// This function returns a new instance of `Read` which will read at most
     /// `limit` bytes, after which it will always return EOF ([`Ok(0)`]). Any
@@ -1145,7 +1150,7 @@ impl<'a> DerefMut for IoSliceMut<'a> {
 
 /// A buffer type used with `Write::write_vectored`.
 ///
-/// It is semantically a wrapper around an `&[u8]`, but is guaranteed to be
+/// It is semantically a wrapper around a `&[u8]`, but is guaranteed to be
 /// ABI compatible with the `iovec` type on Unix platforms and `WSABUF` on
 /// Windows.
 #[stable(feature = "iovec", since = "1.36.0")]
@@ -1321,7 +1326,7 @@ impl Initializer {
 /// * The [`write`] method will attempt to write some data into the object,
 ///   returning how many bytes were successfully written.
 ///
-/// * The [`flush`] method is useful for adaptors and explicit buffers
+/// * The [`flush`] method is useful for adapters and explicit buffers
 ///   themselves for ensuring that all buffered data has been pushed out to the
 ///   'true sink'.
 ///
@@ -1359,11 +1364,12 @@ impl Initializer {
 /// [`write_all`]: Write::write_all
 #[stable(feature = "rust1", since = "1.0.0")]
 #[doc(notable_trait)]
+#[cfg_attr(not(test), rustc_diagnostic_item = "IoWrite")]
 pub trait Write {
     /// Write a buffer into this writer, returning how many bytes were written.
     ///
     /// This function will attempt to write the entire contents of `buf`, but
-    /// the entire write may not succeed, or the write may also generate an
+    /// the entire write might not succeed, or the write may also generate an
     /// error. A call to `write` represents *at most one* attempt to write to
     /// any wrapped object.
     ///
@@ -1415,6 +1421,27 @@ pub trait Write {
     ///
     /// The default implementation calls [`write`] with either the first nonempty
     /// buffer provided, or an empty one if none exists.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::io::IoSlice;
+    /// use std::io::prelude::*;
+    /// use std::fs::File;
+    ///
+    /// fn main() -> std::io::Result<()> {
+    ///     let mut data1 = [1; 8];
+    ///     let mut data2 = [15; 8];
+    ///     let io_slice1 = IoSlice::new(&mut data1);
+    ///     let io_slice2 = IoSlice::new(&mut data2);
+    ///
+    ///     let mut buffer = File::create("foo.txt")?;
+    ///
+    ///     // Writes some prefix of the byte string, not necessarily all of it.
+    ///     buffer.write_vectored(&[io_slice1, io_slice2])?;
+    ///     Ok(())
+    /// }
+    /// ```
     ///
     /// [`write`]: Write::write
     #[stable(feature = "iovec", since = "1.36.0")]
@@ -1619,12 +1646,12 @@ pub trait Write {
     fn write_fmt(&mut self, fmt: fmt::Arguments<'_>) -> Result<()> {
         // Create a shim which translates a Write to a fmt::Write and saves
         // off I/O errors. instead of discarding them
-        struct Adaptor<'a, T: ?Sized + 'a> {
+        struct Adapter<'a, T: ?Sized + 'a> {
             inner: &'a mut T,
             error: Result<()>,
         }
 
-        impl<T: Write + ?Sized> fmt::Write for Adaptor<'_, T> {
+        impl<T: Write + ?Sized> fmt::Write for Adapter<'_, T> {
             fn write_str(&mut self, s: &str) -> fmt::Result {
                 match self.inner.write_all(s.as_bytes()) {
                     Ok(()) => Ok(()),
@@ -1636,7 +1663,7 @@ pub trait Write {
             }
         }
 
-        let mut output = Adaptor { inner: self, error: Ok(()) };
+        let mut output = Adapter { inner: self, error: Ok(()) };
         match fmt::write(&mut output, fmt) {
             Ok(()) => Ok(()),
             Err(..) => {
@@ -1644,15 +1671,15 @@ pub trait Write {
                 if output.error.is_err() {
                     output.error
                 } else {
-                    Err(Error::new_const(ErrorKind::Other, &"formatter error"))
+                    Err(Error::new_const(ErrorKind::Uncategorized, &"formatter error"))
                 }
             }
         }
     }
 
-    /// Creates a "by reference" adaptor for this instance of `Write`.
+    /// Creates a "by reference" adapter for this instance of `Write`.
     ///
-    /// The returned adaptor also implements `Write` and will simply borrow this
+    /// The returned adapter also implements `Write` and will simply borrow this
     /// current writer.
     ///
     /// # Examples
@@ -1736,7 +1763,6 @@ pub trait Seek {
     /// # Example
     ///
     /// ```no_run
-    /// #![feature(seek_rewind)]
     /// use std::io::{Read, Seek, Write};
     /// use std::fs::OpenOptions;
     ///
@@ -1754,7 +1780,7 @@ pub trait Seek {
     /// f.read_to_string(&mut buf).unwrap();
     /// assert_eq!(&buf, hello);
     /// ```
-    #[unstable(feature = "seek_rewind", issue = "85149")]
+    #[stable(feature = "seek_rewind", since = "1.55.0")]
     fn rewind(&mut self) -> Result<()> {
         self.seek(SeekFrom::Start(0))?;
         Ok(())
@@ -2237,7 +2263,7 @@ pub trait BufRead: Read {
     }
 }
 
-/// Adaptor to chain together two readers.
+/// Adapter to chain together two readers.
 ///
 /// This struct is generally created by calling [`chain`] on a reader.
 /// Please see the documentation of [`chain`] for more details.
@@ -2388,7 +2414,7 @@ impl<T, U> SizeHint for Chain<T, U> {
     }
 }
 
-/// Reader adaptor which limits the bytes read from an underlying reader.
+/// Reader adapter which limits the bytes read from an underlying reader.
 ///
 /// This struct is generally created by calling [`take`] on a reader.
 /// Please see the documentation of [`take`] for more details.

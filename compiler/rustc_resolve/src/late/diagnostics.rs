@@ -215,7 +215,6 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                     "let ".to_string(),
                     Applicability::MaybeIncorrect,
                 );
-                self.r.session.if_let_suggestions.borrow_mut().insert(*span);
             }
             _ => {}
         }
@@ -541,6 +540,10 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                     }
                     _ => {}
                 }
+
+                // If the trait has a single item (which wasn't matched by Levenshtein), suggest it
+                let suggestion = self.get_single_associated_item(&path, span, &source, is_expected);
+                self.r.add_typo_suggestion(&mut err, suggestion, ident_span);
             }
             if fallback {
                 // Fallback label.
@@ -583,6 +586,40 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
         }
 
         (err, candidates)
+    }
+
+    fn get_single_associated_item(
+        &mut self,
+        path: &[Segment],
+        span: Span,
+        source: &PathSource<'_>,
+        filter_fn: &impl Fn(Res) -> bool,
+    ) -> Option<TypoSuggestion> {
+        if let crate::PathSource::TraitItem(_) = source {
+            let mod_path = &path[..path.len() - 1];
+            if let PathResult::Module(ModuleOrUniformRoot::Module(module)) =
+                self.resolve_path(mod_path, None, false, span, CrateLint::No)
+            {
+                let resolutions = self.r.resolutions(module).borrow();
+                let targets: Vec<_> =
+                    resolutions
+                        .iter()
+                        .filter_map(|(key, resolution)| {
+                            resolution.borrow().binding.map(|binding| binding.res()).and_then(
+                                |res| if filter_fn(res) { Some((key, res)) } else { None },
+                            )
+                        })
+                        .collect();
+                if targets.len() == 1 {
+                    let target = targets[0];
+                    return Some(TypoSuggestion::single_item_from_res(
+                        target.0.ident.name,
+                        target.1,
+                    ));
+                }
+            }
+        }
+        None
     }
 
     /// Given `where <T as Bar>::Baz: String`, suggest `where T: Bar<Baz = String>`.
@@ -1061,7 +1098,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                         }
                         err.span_suggestion(
                             span,
-                            &format!("use this syntax instead"),
+                            &"use this syntax instead",
                             format!("{path_str}"),
                             Applicability::MaybeIncorrect,
                         );
@@ -1208,7 +1245,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                 // Locals and type parameters
                 for (ident, &res) in &rib.bindings {
                     if filter_fn(res) {
-                        names.push(TypoSuggestion::from_res(ident.name, res));
+                        names.push(TypoSuggestion::typo_from_res(ident.name, res));
                     }
                 }
                 // Items in scope
@@ -1231,7 +1268,9 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                                         );
 
                                         if filter_fn(crate_mod) {
-                                            Some(TypoSuggestion::from_res(ident.name, crate_mod))
+                                            Some(TypoSuggestion::typo_from_res(
+                                                ident.name, crate_mod,
+                                            ))
                                         } else {
                                             None
                                         }
@@ -1249,11 +1288,9 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
             }
             // Add primitive types to the mix
             if filter_fn(Res::PrimTy(PrimTy::Bool)) {
-                names.extend(
-                    PrimTy::ALL.iter().map(|prim_ty| {
-                        TypoSuggestion::from_res(prim_ty.name(), Res::PrimTy(*prim_ty))
-                    }),
-                )
+                names.extend(PrimTy::ALL.iter().map(|prim_ty| {
+                    TypoSuggestion::typo_from_res(prim_ty.name(), Res::PrimTy(*prim_ty))
+                }))
             }
         } else {
             // Search in module.
@@ -1788,7 +1825,7 @@ impl<'tcx> LifetimeContext<'_, 'tcx> {
         err.emit();
     }
 
-    // FIXME(const_generics): This patches over a ICE caused by non-'static lifetimes in const
+    // FIXME(const_generics): This patches over an ICE caused by non-'static lifetimes in const
     // generics. We are disallowing this until we can decide on how we want to handle non-'static
     // lifetimes in const generics. See issue #74052 for discussion.
     crate fn emit_non_static_lt_in_const_generic_error(&self, lifetime_ref: &hir::Lifetime) {
@@ -1962,6 +1999,8 @@ impl<'tcx> LifetimeContext<'_, 'tcx> {
                                 hir::GenericParamKind::Type {
                                     synthetic: Some(hir::SyntheticTyParamKind::ImplTrait),
                                     ..
+                                } | hir::GenericParamKind::Lifetime {
+                                    kind: hir::LifetimeParamKind::Elided
                                 }
                             )
                         }) {
@@ -2033,20 +2072,85 @@ impl<'tcx> LifetimeContext<'_, 'tcx> {
                         continue;
                     }
                 });
+
+                struct Lifetime(Span, String);
+                impl Lifetime {
+                    fn is_unnamed(&self) -> bool {
+                        self.1.starts_with('&') && !self.1.starts_with("&'")
+                    }
+                    fn is_underscore(&self) -> bool {
+                        self.1.starts_with("&'_ ")
+                    }
+                    fn is_named(&self) -> bool {
+                        self.1.starts_with("&'")
+                    }
+                    fn suggestion(&self, sugg: String) -> Option<(Span, String)> {
+                        Some(
+                            match (
+                                self.is_unnamed(),
+                                self.is_underscore(),
+                                self.is_named(),
+                                sugg.starts_with("&"),
+                            ) {
+                                (true, _, _, false) => (self.span_unnamed_borrow(), sugg),
+                                (true, _, _, true) => {
+                                    (self.span_unnamed_borrow(), sugg[1..].to_string())
+                                }
+                                (_, true, _, false) => {
+                                    (self.span_underscore_borrow(), sugg.trim().to_string())
+                                }
+                                (_, true, _, true) => {
+                                    (self.span_underscore_borrow(), sugg[1..].trim().to_string())
+                                }
+                                (_, _, true, false) => {
+                                    (self.span_named_borrow(), sugg.trim().to_string())
+                                }
+                                (_, _, true, true) => {
+                                    (self.span_named_borrow(), sugg[1..].trim().to_string())
+                                }
+                                _ => return None,
+                            },
+                        )
+                    }
+                    fn span_unnamed_borrow(&self) -> Span {
+                        let lo = self.0.lo() + BytePos(1);
+                        self.0.with_lo(lo).with_hi(lo)
+                    }
+                    fn span_named_borrow(&self) -> Span {
+                        let lo = self.0.lo() + BytePos(1);
+                        self.0.with_lo(lo)
+                    }
+                    fn span_underscore_borrow(&self) -> Span {
+                        let lo = self.0.lo() + BytePos(1);
+                        let hi = lo + BytePos(2);
+                        self.0.with_lo(lo).with_hi(hi)
+                    }
+                }
+
                 for param in params {
                     if let Ok(snippet) = self.tcx.sess.source_map().span_to_snippet(param.span) {
-                        if snippet.starts_with('&') && !snippet.starts_with("&'") {
-                            introduce_suggestion
-                                .push((param.span, format!("&'a {}", &snippet[1..])));
-                        } else if let Some(stripped) = snippet.strip_prefix("&'_ ") {
-                            introduce_suggestion.push((param.span, format!("&'a {}", &stripped)));
+                        if let Some((span, sugg)) =
+                            Lifetime(param.span, snippet).suggestion("'a ".to_string())
+                        {
+                            introduce_suggestion.push((span, sugg));
                         }
                     }
                 }
-                for ((span, _), sugg) in spans_with_counts.iter().copied().zip(suggs.iter()) {
-                    if let Some(sugg) = sugg {
-                        introduce_suggestion.push((span, sugg.to_string()));
-                    }
+                for (span, sugg) in spans_with_counts.iter().copied().zip(suggs.iter()).filter_map(
+                    |((span, _), sugg)| match &sugg {
+                        Some(sugg) => Some((span, sugg.to_string())),
+                        _ => None,
+                    },
+                ) {
+                    let (span, sugg) = self
+                        .tcx
+                        .sess
+                        .source_map()
+                        .span_to_snippet(span)
+                        .ok()
+                        .and_then(|snippet| Lifetime(span, snippet).suggestion(sugg.clone()))
+                        .unwrap_or((span, sugg));
+                    introduce_suggestion.push((span, sugg.to_string()));
                 }
                 err.multipart_suggestion_with_style(
                     &msg,
@@ -2119,7 +2223,8 @@ impl<'tcx> LifetimeContext<'_, 'tcx> {
                 for ((span, _), snippet) in spans_with_counts.iter().copied().zip(snippets.iter()) {
                     match snippet.as_deref() {
                         Some("") => spans_suggs.push((span, "'lifetime, ".to_string())),
-                        Some("&") => spans_suggs.push((span, "&'lifetime ".to_string())),
+                        Some("&") => spans_suggs
+                            .push((span.with_lo(span.lo() + BytePos(1)), "'lifetime ".to_string())),
                         _ => {}
                     }
                 }

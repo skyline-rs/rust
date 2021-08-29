@@ -1,7 +1,7 @@
 //! lint on inherent implementations
 
 use clippy_utils::diagnostics::span_lint_and_note;
-use clippy_utils::{in_macro, is_allowed};
+use clippy_utils::{in_macro, is_lint_allowed};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_hir::{def_id::LocalDefId, Crate, Item, ItemKind, Node};
 use rustc_lint::{LateContext, LateLintPass};
@@ -10,13 +10,13 @@ use rustc_span::Span;
 use std::collections::hash_map::Entry;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for multiple inherent implementations of a struct
+    /// ### What it does
+    /// Checks for multiple inherent implementations of a struct
     ///
-    /// **Why is this bad?** Splitting the implementation of a type makes the code harder to navigate.
+    /// ### Why is this bad?
+    /// Splitting the implementation of a type makes the code harder to navigate.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// struct X;
     /// impl X {
@@ -59,7 +59,7 @@ impl<'tcx> LateLintPass<'tcx> for MultipleInherentImpl {
             .filter(|(&id, impls)| {
                 impls.len() > 1
                     // Check for `#[allow]` on the type definition
-                    && !is_allowed(
+                    && !is_lint_allowed(
                         cx,
                         MULTIPLE_INHERENT_IMPL,
                         cx.tcx.hir().local_def_id_to_hir_id(id),
@@ -123,7 +123,7 @@ fn get_impl_span(cx: &LateContext<'_>, id: LocalDefId) -> Option<Span> {
         ..
     }) = cx.tcx.hir().get(id)
     {
-        (!in_macro(span) && impl_item.generics.params.is_empty() && !is_allowed(cx, MULTIPLE_INHERENT_IMPL, id))
+        (!in_macro(span) && impl_item.generics.params.is_empty() && !is_lint_allowed(cx, MULTIPLE_INHERENT_IMPL, id))
             .then(|| span)
     } else {
         None

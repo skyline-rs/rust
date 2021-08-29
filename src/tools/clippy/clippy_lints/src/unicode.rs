@@ -1,5 +1,5 @@
 use clippy_utils::diagnostics::span_lint_and_sugg;
-use clippy_utils::is_allowed;
+use clippy_utils::is_lint_allowed;
 use clippy_utils::source::snippet;
 use rustc_ast::ast::LitKind;
 use rustc_errors::Applicability;
@@ -10,14 +10,15 @@ use rustc_span::source_map::Span;
 use unicode_normalization::UnicodeNormalization;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for invisible Unicode characters in the code.
+    /// ### What it does
+    /// Checks for invisible Unicode characters in the code.
     ///
-    /// **Why is this bad?** Having an invisible character in the code makes for all
+    /// ### Why is this bad?
+    /// Having an invisible character in the code makes for all
     /// sorts of April fools, but otherwise is very much frowned upon.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:** You don't see it, but there may be a zero-width space or soft hyphen
+    /// ### Example
+    /// You don't see it, but there may be a zero-width space or soft hyphen
     /// some­where in this text.
     pub INVISIBLE_CHARACTERS,
     correctness,
@@ -25,17 +26,17 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for non-ASCII characters in string literals.
+    /// ### What it does
+    /// Checks for non-ASCII characters in string literals.
     ///
-    /// **Why is this bad?** Yeah, we know, the 90's called and wanted their charset
+    /// ### Why is this bad?
+    /// Yeah, we know, the 90's called and wanted their charset
     /// back. Even so, there still are editors and other programs out there that
     /// don't work well with Unicode. So if the code is meant to be used
     /// internationally, on multiple operating systems, or has other portability
     /// requirements, activating this lint could be useful.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// let x = String::from("€");
     /// ```
@@ -49,16 +50,17 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for string literals that contain Unicode in a form
+    /// ### What it does
+    /// Checks for string literals that contain Unicode in a form
     /// that is not equal to its
     /// [NFC-recomposition](http://www.unicode.org/reports/tr15/#Norm_Forms).
     ///
-    /// **Why is this bad?** If such a string is compared to another, the results
+    /// ### Why is this bad?
+    /// If such a string is compared to another, the results
     /// may be surprising.
     ///
-    /// **Known problems** None.
-    ///
-    /// **Example:** You may not see it, but "à"" and "à"" aren't the same string. The
+    /// ### Example
+    /// You may not see it, but "à"" and "à"" aren't the same string. The
     /// former when escaped is actually `"a\u{300}"` while the latter is `"\u{e0}"`.
     pub UNICODE_NOT_NFC,
     pedantic,
@@ -114,7 +116,7 @@ fn check_str(cx: &LateContext<'_>, span: Span, id: HirId) {
             span,
             "literal non-ASCII character detected",
             "consider replacing the string with",
-            if is_allowed(cx, UNICODE_NOT_NFC, id) {
+            if is_lint_allowed(cx, UNICODE_NOT_NFC, id) {
                 escape(string.chars())
             } else {
                 escape(string.nfc())
@@ -122,7 +124,7 @@ fn check_str(cx: &LateContext<'_>, span: Span, id: HirId) {
             Applicability::MachineApplicable,
         );
     }
-    if is_allowed(cx, NON_ASCII_LITERAL, id) && string.chars().zip(string.nfc()).any(|(a, b)| a != b) {
+    if is_lint_allowed(cx, NON_ASCII_LITERAL, id) && string.chars().zip(string.nfc()).any(|(a, b)| a != b) {
         span_lint_and_sugg(
             cx,
             UNICODE_NOT_NFC,

@@ -11,12 +11,12 @@ use rustc_errors::{pluralize, struct_span_err, Applicability, PResult};
 use rustc_span::source_map::Span;
 use rustc_span::symbol::{kw, sym};
 
-/// Any `?` or `?const` modifiers that appear at the start of a bound.
+/// Any `?` or `~const` modifiers that appear at the start of a bound.
 struct BoundModifiers {
     /// `?Trait`.
     maybe: Option<Span>,
 
-    /// `?const Trait`.
+    /// `~const Trait`.
     maybe_const: Option<Span>,
 }
 
@@ -393,7 +393,7 @@ impl<'a> Parser<'a> {
         let and_span = self.prev_token.span;
         let mut opt_lifetime =
             if self.check_lifetime() { Some(self.expect_lifetime()) } else { None };
-        let mutbl = self.parse_mutability();
+        let mut mutbl = self.parse_mutability();
         if self.token.is_lifetime() && mutbl == Mutability::Mut && opt_lifetime.is_none() {
             // A lifetime is invalid here: it would be part of a bare trait bound, which requires
             // it to be followed by a plus, but we disallow plus in the pointee type.
@@ -417,6 +417,26 @@ impl<'a> Parser<'a> {
 
                 opt_lifetime = Some(self.expect_lifetime());
             }
+        } else if self.token.is_keyword(kw::Dyn)
+            && mutbl == Mutability::Not
+            && self.look_ahead(1, |t| t.is_keyword(kw::Mut))
+        {
+            // We have `&dyn mut ...`, which is invalid and should be `&mut dyn ...`.
+            let span = and_span.to(self.look_ahead(1, |t| t.span));
+            let mut err = self.struct_span_err(span, "`mut` must precede `dyn`");
+            err.span_suggestion(
+                span,
+                "place `mut` before `dyn`",
+                "&mut dyn".to_string(),
+                Applicability::MachineApplicable,
+            );
+            err.emit();
+
+            // Recovery
+            mutbl = Mutability::Mut;
+            let (dyn_tok, dyn_tok_sp) = (self.token.clone(), self.token_spacing);
+            self.bump();
+            self.bump_with((dyn_tok, dyn_tok_sp));
         }
         let ty = self.parse_ty_no_plus()?;
         Ok(TyKind::Rptr(opt_lifetime, MutTy { ty, mutbl }))
@@ -589,6 +609,7 @@ impl<'a> Parser<'a> {
         || self.check_lifetime()
         || self.check(&token::Not) // Used for error reporting only.
         || self.check(&token::Question)
+        || self.check(&token::Tilde)
         || self.check_keyword(kw::For)
         || self.check(&token::OpenDelim(token::Paren))
     }
@@ -635,7 +656,7 @@ impl<'a> Parser<'a> {
         let inner_lo = self.token.span;
         let is_negative = self.eat(&token::Not);
 
-        let modifiers = self.parse_ty_bound_modifiers();
+        let modifiers = self.parse_ty_bound_modifiers()?;
         let bound = if self.token.is_lifetime() {
             self.error_lt_bound_with_modifiers(modifiers);
             self.parse_generic_lt_bound(lo, inner_lo, has_parens)?
@@ -670,7 +691,7 @@ impl<'a> Parser<'a> {
         if let Some(span) = modifiers.maybe_const {
             self.struct_span_err(
                 span,
-                "`?const` may only modify trait bounds, not lifetime bounds",
+                "`~const` may only modify trait bounds, not lifetime bounds",
             )
             .emit();
         }
@@ -701,34 +722,27 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Parses the modifiers that may precede a trait in a bound, e.g. `?Trait` or `?const Trait`.
+    /// Parses the modifiers that may precede a trait in a bound, e.g. `?Trait` or `~const Trait`.
     ///
     /// If no modifiers are present, this does not consume any tokens.
     ///
     /// ```
-    /// TY_BOUND_MODIFIERS = "?" ["const" ["?"]]
+    /// TY_BOUND_MODIFIERS = ["~const"] ["?"]
     /// ```
-    fn parse_ty_bound_modifiers(&mut self) -> BoundModifiers {
-        if !self.eat(&token::Question) {
-            return BoundModifiers { maybe: None, maybe_const: None };
-        }
+    fn parse_ty_bound_modifiers(&mut self) -> PResult<'a, BoundModifiers> {
+        let maybe_const = if self.eat(&token::Tilde) {
+            let tilde = self.prev_token.span;
+            self.expect_keyword(kw::Const)?;
+            let span = tilde.to(self.prev_token.span);
+            self.sess.gated_spans.gate(sym::const_trait_impl, span);
+            Some(span)
+        } else {
+            None
+        };
 
-        // `? ...`
-        let first_question = self.prev_token.span;
-        if !self.eat_keyword(kw::Const) {
-            return BoundModifiers { maybe: Some(first_question), maybe_const: None };
-        }
+        let maybe = if self.eat(&token::Question) { Some(self.prev_token.span) } else { None };
 
-        // `?const ...`
-        let maybe_const = first_question.to(self.prev_token.span);
-        self.sess.gated_spans.gate(sym::const_trait_bound_opt_out, maybe_const);
-        if !self.eat(&token::Question) {
-            return BoundModifiers { maybe: None, maybe_const: Some(maybe_const) };
-        }
-
-        // `?const ? ...`
-        let second_question = self.prev_token.span;
-        BoundModifiers { maybe: Some(second_question), maybe_const: Some(maybe_const) }
+        Ok(BoundModifiers { maybe, maybe_const })
     }
 
     /// Parses a type bound according to:
@@ -737,7 +751,7 @@ impl<'a> Parser<'a> {
     /// TY_BOUND_NOPAREN = [TY_BOUND_MODIFIERS] [for<LT_PARAM_DEFS>] SIMPLE_PATH
     /// ```
     ///
-    /// For example, this grammar accepts `?const ?for<'a: 'b> m::Trait<'a>`.
+    /// For example, this grammar accepts `~const ?for<'a: 'b> m::Trait<'a>`.
     fn parse_generic_ty_bound(
         &mut self,
         lo: Span,

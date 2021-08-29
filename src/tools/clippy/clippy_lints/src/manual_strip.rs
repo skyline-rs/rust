@@ -18,21 +18,17 @@ use rustc_span::source_map::Spanned;
 use rustc_span::Span;
 
 declare_clippy_lint! {
-    /// **What it does:**
+    /// ### What it does
     /// Suggests using `strip_{prefix,suffix}` over `str::{starts,ends}_with` and slicing using
     /// the pattern's length.
     ///
-    /// **Why is this bad?**
+    /// ### Why is this bad?
     /// Using `str:strip_{prefix,suffix}` is safer and may have better performance as there is no
     /// slicing which may panic and the compiler does not need to insert this panic code. It is
     /// also sometimes more readable as it removes the need for duplicating or storing the pattern
     /// used by `str::{starts,ends}_with` and in the slicing.
     ///
-    /// **Known problems:**
-    /// None.
-    ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust
     /// let s = "hello, world!";
     /// if s.starts_with("hello, ") {
@@ -77,7 +73,7 @@ impl<'tcx> LateLintPass<'tcx> for ManualStrip {
         }
 
         if_chain! {
-            if let ExprKind::If(cond, then, _) = &expr.kind;
+            if let Some(higher::If { cond, then, .. }) = higher::If::hir(expr);
             if let ExprKind::MethodCall(_, _, [target_arg, pattern], _) = cond.kind;
             if let Some(method_def_id) = cx.typeck_results().type_dependent_def_id(cond.hir_id);
             if let ExprKind::Path(target_path) = &target_arg.kind;
@@ -216,7 +212,7 @@ fn find_stripping<'tcx>(
                 if is_ref_str(self.cx, ex);
                 let unref = peel_ref(ex);
                 if let ExprKind::Index(indexed, index) = &unref.kind;
-                if let Some(higher::Range { start, end, .. }) = higher::range(index);
+                if let Some(higher::Range { start, end, .. }) = higher::Range::hir(index);
                 if let ExprKind::Path(path) = &indexed.kind;
                 if self.cx.qpath_res(path, ex.hir_id) == self.target;
                 then {

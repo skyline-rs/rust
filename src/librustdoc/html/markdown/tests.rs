@@ -225,6 +225,7 @@ fn test_short_markdown_summary() {
         assert_eq!(output, expect, "original: {}", input);
     }
 
+    t("", "");
     t("hello [Rust](https://www.rust-lang.org) :)", "hello Rust :)");
     t("*italic*", "<em>italic</em>");
     t("**bold**", "<strong>bold</strong>");
@@ -234,7 +235,17 @@ fn test_short_markdown_summary() {
     t("hello [Rust](https://www.rust-lang.org \"Rust\") :)", "hello Rust :)");
     t("dud [link]", "dud [link]");
     t("code `let x = i32;` ...", "code <code>let x = i32;</code> …");
-    t("type `Type<'static>` ...", "type <code>Type<'static></code> …");
+    t("type `Type<'static>` ...", "type <code>Type&lt;&#39;static&gt;</code> …");
+    // Test to ensure escaping and length-limiting work well together.
+    // The output should be limited based on the input length,
+    // rather than the output, because escaped versions of characters
+    // are usually longer than how the character is actually displayed.
+    t(
+        "& & & & & & & & & & & & & & & & & & & & & & & & & & & & & & & & & & & & &",
+        "&amp; &amp; &amp; &amp; &amp; &amp; &amp; &amp; &amp; &amp; &amp; &amp; \
+         &amp; &amp; &amp; &amp; &amp; &amp; &amp; &amp; &amp; &amp; &amp; &amp; \
+         &amp; &amp; &amp; &amp; &amp; …",
+    );
     t("# top header", "top header");
     t("# top header\n\nfollowed by a paragraph", "top header");
     t("## header", "header");
@@ -254,6 +265,7 @@ fn test_plain_text_summary() {
         assert_eq!(output, expect, "original: {}", input);
     }
 
+    t("", "");
     t("hello [Rust](https://www.rust-lang.org) :)", "hello Rust :)");
     t("**bold**", "bold");
     t("Multi-line\nsummary", "Multi-line summary");

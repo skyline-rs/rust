@@ -1,6 +1,4 @@
-use std::collections::BTreeMap;
 use std::mem;
-use std::path::Path;
 
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir::def_id::{CrateNum, DefId, CRATE_DEF_INDEX};
@@ -8,7 +6,8 @@ use rustc_middle::middle::privacy::AccessLevels;
 use rustc_middle::ty::TyCtxt;
 use rustc_span::symbol::sym;
 
-use crate::clean::{self, FakeDefId, GetDefId};
+use crate::clean::{self, GetDefId, ItemId};
+use crate::config::RenderOptions;
 use crate::fold::DocFolder;
 use crate::formats::item_type::ItemType;
 use crate::formats::Impl;
@@ -23,7 +22,7 @@ use crate::html::render::IndexItem;
 ///
 /// This structure purposefully does not implement `Clone` because it's intended
 /// to be a fairly large and expensive structure to clone. Instead this adheres
-/// to `Send` so it may be stored in a `Arc` instance and shared among the various
+/// to `Send` so it may be stored in an `Arc` instance and shared among the various
 /// rendering threads.
 #[derive(Default)]
 crate struct Cache {
@@ -122,7 +121,7 @@ crate struct Cache {
     /// All intra-doc links resolved so far.
     ///
     /// Links are indexed by the DefId of the item they document.
-    crate intra_doc_links: BTreeMap<FakeDefId, Vec<clean::ItemLink>>,
+    crate intra_doc_links: FxHashMap<ItemId, Vec<clean::ItemLink>>,
 }
 
 /// This struct is used to wrap the `cache` and `tcx` in order to run `DocFolder`.
@@ -142,28 +141,29 @@ impl Cache {
         &mut self,
         mut krate: clean::Crate,
         tcx: TyCtxt<'_>,
-        extern_html_root_urls: &BTreeMap<String, String>,
-        dst: &Path,
+        render_options: &RenderOptions,
     ) -> clean::Crate {
         // Crawl the crate to build various caches used for the output
         debug!(?self.crate_version);
         self.traits = krate.external_traits.take();
+        let RenderOptions { extern_html_root_takes_precedence, output: dst, .. } = render_options;
 
         // Cache where all our extern crates are located
         // FIXME: this part is specific to HTML so it'd be nice to remove it from the common code
-        for &(n, ref e) in &krate.externs {
+        for &e in &krate.externs {
             let name = e.name(tcx);
-            let extern_url = extern_html_root_urls.get(&*name.as_str()).map(|u| &**u);
-            let did = DefId { krate: n, index: CRATE_DEF_INDEX };
-            self.extern_locations.insert(n, e.location(extern_url, &dst, tcx));
-            self.external_paths.insert(did, (vec![name.to_string()], ItemType::Module));
+            let extern_url =
+                render_options.extern_html_root_urls.get(&*name.as_str()).map(|u| &**u);
+            let location = e.location(extern_url, *extern_html_root_takes_precedence, dst, tcx);
+            self.extern_locations.insert(e.crate_num, location);
+            self.external_paths.insert(e.def_id(), (vec![name.to_string()], ItemType::Module));
         }
 
         // Cache where all known primitives have their documentation located.
         //
         // Favor linking to as local extern as possible, so iterate all crates in
         // reverse topological order.
-        for &(_, ref e) in krate.externs.iter().rev() {
+        for &e in krate.externs.iter().rev() {
             for &(def_id, prim) in &e.primitives(tcx) {
                 self.primitive_locations.insert(prim, def_id);
             }
@@ -215,7 +215,7 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
         // Propagate a trait method's documentation to all implementors of the
         // trait.
         if let clean::TraitItem(ref t) = *item.kind {
-            self.cache.traits.entry(item.def_id.expect_real()).or_insert_with(|| {
+            self.cache.traits.entry(item.def_id.expect_def_id()).or_insert_with(|| {
                 clean::TraitWithExtraInfo {
                     trait_: t.clone(),
                     is_notable: item.attrs.has_doc_flag(sym::notable_trait),
@@ -229,7 +229,7 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
                 if i.blanket_impl.is_none() {
                     self.cache
                         .implementors
-                        .entry(did.into())
+                        .entry(did)
                         .or_default()
                         .push(Impl { impl_item: item.clone() });
                 }
@@ -348,11 +348,11 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
                     // `public_items` map, so we can skip inserting into the
                     // paths map if there was already an entry present and we're
                     // not a public item.
-                    if !self.cache.paths.contains_key(&item.def_id.expect_real())
-                        || self.cache.access_levels.is_public(item.def_id.expect_real())
+                    if !self.cache.paths.contains_key(&item.def_id.expect_def_id())
+                        || self.cache.access_levels.is_public(item.def_id.expect_def_id())
                     {
                         self.cache.paths.insert(
-                            item.def_id.expect_real(),
+                            item.def_id.expect_def_id(),
                             (self.cache.stack.clone(), item.type_()),
                         );
                     }
@@ -361,7 +361,7 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
             clean::PrimitiveItem(..) => {
                 self.cache
                     .paths
-                    .insert(item.def_id.expect_real(), (self.cache.stack.clone(), item.type_()));
+                    .insert(item.def_id.expect_def_id(), (self.cache.stack.clone(), item.type_()));
             }
 
             clean::ExternCrateItem { .. }
@@ -391,7 +391,7 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
             | clean::StructItem(..)
             | clean::UnionItem(..)
             | clean::VariantItem(..) => {
-                self.cache.parent_stack.push(item.def_id.expect_real());
+                self.cache.parent_stack.push(item.def_id.expect_def_id());
                 self.cache.parent_is_trait_impl = false;
                 true
             }

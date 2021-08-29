@@ -14,16 +14,19 @@ use rustc_span::source_map::Span;
 use rustc_span::sym;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for boolean expressions that can be written more
+    /// ### What it does
+    /// Checks for boolean expressions that can be written more
     /// concisely.
     ///
-    /// **Why is this bad?** Readability of boolean expressions suffers from
+    /// ### Why is this bad?
+    /// Readability of boolean expressions suffers from
     /// unnecessary duplication.
     ///
-    /// **Known problems:** Ignores short circuiting behavior of `||` and
+    /// ### Known problems
+    /// Ignores short circuiting behavior of `||` and
     /// `&&`. Ignores `|`, `&` and `^`.
     ///
-    /// **Example:**
+    /// ### Example
     /// ```ignore
     /// if a && true  // should be: if a
     /// if !(a == b)  // should be: if a != b
@@ -34,14 +37,17 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for boolean expressions that contain terminals that
+    /// ### What it does
+    /// Checks for boolean expressions that contain terminals that
     /// can be eliminated.
     ///
-    /// **Why is this bad?** This is most likely a logic bug.
+    /// ### Why is this bad?
+    /// This is most likely a logic bug.
     ///
-    /// **Known problems:** Ignores short circuiting behavior.
+    /// ### Known problems
+    /// Ignores short circuiting behavior.
     ///
-    /// **Example:**
+    /// ### Example
     /// ```ignore
     /// if a && b || a { ... }
     /// ```
@@ -110,7 +116,7 @@ impl<'a, 'tcx, 'v> Hir2Qmm<'a, 'tcx, 'v> {
         // prevent folding of `cfg!` macros and the like
         if !e.span.from_expansion() {
             match &e.kind {
-                ExprKind::Unary(UnOp::Not, inner) => return Ok(Bool::Not(box self.run(inner)?)),
+                ExprKind::Unary(UnOp::Not, inner) => return Ok(Bool::Not(Box::new(self.run(inner)?))),
                 ExprKind::Binary(binop, lhs, rhs) => match &binop.node {
                     BinOpKind::Or => {
                         return Ok(Bool::Or(self.extract(BinOpKind::Or, &[lhs, rhs], Vec::new())?));

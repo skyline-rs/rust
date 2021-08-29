@@ -1,5 +1,7 @@
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
+#![feature(if_let_guard)]
 #![feature(nll)]
+#![cfg_attr(bootstrap, allow(incomplete_features))] // if_let_guard
 #![recursion_limit = "256"]
 
 mod dump_visitor;
@@ -109,9 +111,9 @@ impl<'tcx> SaveContext<'tcx> {
 
     // List external crates used by the current crate.
     pub fn get_external_crates(&self) -> Vec<ExternalCrateData> {
-        let mut result = Vec::with_capacity(self.tcx.crates().len());
+        let mut result = Vec::with_capacity(self.tcx.crates(()).len());
 
-        for &n in self.tcx.crates().iter() {
+        for &n in self.tcx.crates(()).iter() {
             let span = match self.tcx.extern_crate(n.as_def_id()) {
                 Some(&ExternCrate { span, .. }) => span,
                 None => {
@@ -127,7 +129,10 @@ impl<'tcx> SaveContext<'tcx> {
                 num: n.as_u32(),
                 id: GlobalCrateId {
                     name: self.tcx.crate_name(n).to_string(),
-                    disambiguator: self.tcx.crate_disambiguator(n).to_fingerprint().as_value(),
+                    disambiguator: (
+                        self.tcx.def_path_hash(n.as_def_id()).stable_crate_id().to_u64(),
+                        0,
+                    ),
                 },
             });
         }
@@ -323,54 +328,53 @@ impl<'tcx> SaveContext<'tcx> {
                     attributes: lower_attributes(attrs.to_vec(), self),
                 }))
             }
-            hir::ItemKind::Impl(hir::Impl { ref of_trait, ref self_ty, ref items, .. }) => {
-                if let hir::TyKind::Path(hir::QPath::Resolved(_, ref path)) = self_ty.kind {
-                    // Common case impl for a struct or something basic.
-                    if generated_code(path.span) {
-                        return None;
-                    }
-                    let sub_span = path.segments.last().unwrap().ident.span;
-                    filter!(self.span_utils, sub_span);
-
-                    let impl_id = self.next_impl_id();
-                    let span = self.span_from_span(sub_span);
-
-                    let type_data = self.lookup_def_id(self_ty.hir_id);
-                    type_data.map(|type_data| {
-                        Data::RelationData(
-                            Relation {
-                                kind: RelationKind::Impl { id: impl_id },
-                                span: span.clone(),
-                                from: id_from_def_id(type_data),
-                                to: of_trait
-                                    .as_ref()
-                                    .and_then(|t| self.lookup_def_id(t.hir_ref_id))
-                                    .map(id_from_def_id)
-                                    .unwrap_or_else(null_id),
-                            },
-                            Impl {
-                                id: impl_id,
-                                kind: match *of_trait {
-                                    Some(_) => ImplKind::Direct,
-                                    None => ImplKind::Inherent,
-                                },
-                                span,
-                                value: String::new(),
-                                parent: None,
-                                children: items
-                                    .iter()
-                                    .map(|i| id_from_def_id(i.id.def_id.to_def_id()))
-                                    .collect(),
-                                docs: String::new(),
-                                sig: None,
-                                attributes: vec![],
-                            },
-                        )
-                    })
-                } else {
-                    None
+            hir::ItemKind::Impl(hir::Impl { ref of_trait, ref self_ty, ref items, .. })
+                if let hir::TyKind::Path(hir::QPath::Resolved(_, ref path)) = self_ty.kind =>
+            {
+                // Common case impl for a struct or something basic.
+                if generated_code(path.span) {
+                    return None;
                 }
+                let sub_span = path.segments.last().unwrap().ident.span;
+                filter!(self.span_utils, sub_span);
+
+                let impl_id = self.next_impl_id();
+                let span = self.span_from_span(sub_span);
+
+                let type_data = self.lookup_def_id(self_ty.hir_id);
+                type_data.map(|type_data| {
+                    Data::RelationData(
+                        Relation {
+                            kind: RelationKind::Impl { id: impl_id },
+                            span: span.clone(),
+                            from: id_from_def_id(type_data),
+                            to: of_trait
+                                .as_ref()
+                                .and_then(|t| self.lookup_def_id(t.hir_ref_id))
+                                .map(id_from_def_id)
+                                .unwrap_or_else(null_id),
+                        },
+                        Impl {
+                            id: impl_id,
+                            kind: match *of_trait {
+                                Some(_) => ImplKind::Direct,
+                                None => ImplKind::Inherent,
+                            },
+                            span,
+                            value: String::new(),
+                            parent: None,
+                            children: items
+                                .iter()
+                                .map(|i| id_from_def_id(i.id.def_id.to_def_id()))
+                                .collect(),
+                            docs: String::new(),
+                            sig: None,
+                            attributes: vec![],
+                        },
+                    )
+                })
             }
+            hir::ItemKind::Impl(_) => None,
             _ => {
                 // FIXME
                 bug!();
@@ -785,7 +789,7 @@ impl<'tcx> SaveContext<'tcx> {
         let callee = span.source_callee()?;
 
         let mac_name = match callee.kind {
-            ExpnKind::Macro { kind, name, proc_macro: _ } => match kind {
+            ExpnKind::Macro(kind, name) => match kind {
                 MacroKind::Bang => name,
 
                 // Ignore attribute macros, their spans are usually mangled

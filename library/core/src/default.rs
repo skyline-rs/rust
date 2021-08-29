@@ -161,7 +161,7 @@ pub fn default<T: Default>() -> T {
 }
 
 /// Derive macro generating an impl of the trait `Default`.
-#[rustc_builtin_macro]
+#[rustc_builtin_macro(Default, attributes(default))]
 #[stable(feature = "builtin_macro_prelude", since = "1.38.0")]
 #[allow_internal_unstable(core_intrinsics)]
 pub macro Default($item:item) {
@@ -171,7 +171,8 @@ pub macro Default($item:item) {
 macro_rules! default_impl {
     ($t:ty, $v:expr, $doc:tt) => {
         #[stable(feature = "rust1", since = "1.0.0")]
-        impl Default for $t {
+        #[rustc_const_unstable(feature = "const_default_impls", issue = "87864")]
+        impl const Default for $t {
             #[inline]
             #[doc = $doc]
             fn default() -> $t {

@@ -100,7 +100,7 @@ pub trait FileLoader {
     /// Query the existence of a file.
     fn file_exists(&self, path: &Path) -> bool;
 
-    /// Read the contents of an UTF-8 file into memory.
+    /// Read the contents of a UTF-8 file into memory.
     fn read_file(&self, path: &Path) -> io::Result<String>;
 }
 
@@ -461,9 +461,13 @@ impl SourceMap {
     }
 
     pub fn is_multiline(&self, sp: Span) -> bool {
-        let lo = self.lookup_char_pos(sp.lo());
-        let hi = self.lookup_char_pos(sp.hi());
-        lo.line != hi.line
+        let lo = self.lookup_source_file_idx(sp.lo());
+        let hi = self.lookup_source_file_idx(sp.hi());
+        if lo != hi {
+            return true;
+        }
+        let f = (*self.files.borrow().source_files)[lo].clone();
+        f.lookup_line(sp.lo()) != f.lookup_line(sp.hi())
     }
 
     pub fn is_valid_span(&self, sp: Span) -> Result<(Loc, Loc), SpanLinesError> {
@@ -978,15 +982,13 @@ impl SourceMap {
         None
     }
     pub fn ensure_source_file_source_present(&self, source_file: Lrc<SourceFile>) -> bool {
-        source_file.add_external_src(|| match source_file.name {
-            FileName::Real(ref name) => {
-                if let Some(local_path) = name.local_path() {
+        source_file.add_external_src(|| {
+            match source_file.name {
+                FileName::Real(ref name) if let Some(local_path) = name.local_path() => {
                     self.file_loader.read_file(local_path).ok()
-                } else {
-                    None
                 }
+                _ => None,
             }
-            _ => None,
         })
     }
 
@@ -1029,22 +1031,19 @@ impl FilePathMapping {
 
     fn map_filename_prefix(&self, file: &FileName) -> (FileName, bool) {
         match file {
-            FileName::Real(realfile) => {
-                if let RealFileName::LocalPath(local_path) = realfile {
-                    let (mapped_path, mapped) = self.map_prefix(local_path.to_path_buf());
-                    let realfile = if mapped {
-                        RealFileName::Remapped {
-                            local_path: Some(local_path.clone()),
-                            virtual_name: mapped_path,
-                        }
-                    } else {
-                        realfile.clone()
-                    };
-                    (FileName::Real(realfile), mapped)
+            FileName::Real(realfile) if let RealFileName::LocalPath(local_path) = realfile => {
+                let (mapped_path, mapped) = self.map_prefix(local_path.to_path_buf());
+                let realfile = if mapped {
+                    RealFileName::Remapped {
+                        local_path: Some(local_path.clone()),
+                        virtual_name: mapped_path,
+                    }
                 } else {
-                    unreachable!("attempted to remap an already remapped filename");
-                }
+                    realfile.clone()
+                };
+                (FileName::Real(realfile), mapped)
             }
+            FileName::Real(_) => unreachable!("attempted to remap an already remapped filename"),
             other => (other.clone(), false),
         }
     }

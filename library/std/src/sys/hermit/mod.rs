@@ -32,6 +32,8 @@ pub mod memchr;
 pub mod mutex;
 pub mod net;
 pub mod os;
+#[path = "../unix/os_str.rs"]
+pub mod os_str;
 #[path = "../unix/path.rs"]
 pub mod path;
 #[path = "../unsupported/pipe.rs"]
@@ -47,7 +49,6 @@ pub mod thread_local_key;
 pub mod time;
 
 use crate::io::ErrorKind;
-pub use crate::sys_common::os_str_bytes as os_str;
 
 #[allow(unused_extern_crates)]
 pub extern crate hermit_abi as abi;
@@ -149,7 +150,7 @@ pub fn decode_error_kind(errno: i32) -> ErrorKind {
         x if x == 1 as i32 => ErrorKind::PermissionDenied,
         x if x == 32 as i32 => ErrorKind::BrokenPipe,
         x if x == 110 as i32 => ErrorKind::TimedOut,
-        _ => ErrorKind::Other,
+        _ => ErrorKind::Uncategorized,
     }
 }
 

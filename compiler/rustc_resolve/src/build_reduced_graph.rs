@@ -31,7 +31,7 @@ use rustc_middle::bug;
 use rustc_middle::hir::exports::Export;
 use rustc_middle::middle::cstore::CrateStore;
 use rustc_middle::ty;
-use rustc_span::hygiene::{ExpnId, MacroKind};
+use rustc_span::hygiene::{ExpnId, LocalExpnId, MacroKind};
 use rustc_span::source_map::{respan, Spanned};
 use rustc_span::symbol::{kw, sym, Ident, Symbol};
 use rustc_span::Span;
@@ -42,7 +42,7 @@ use tracing::debug;
 
 type Res = def::Res<NodeId>;
 
-impl<'a> ToNameBinding<'a> for (Module<'a>, ty::Visibility, Span, ExpnId) {
+impl<'a> ToNameBinding<'a> for (Module<'a>, ty::Visibility, Span, LocalExpnId) {
     fn to_name_binding(self, arenas: &'a ResolverArenas<'a>) -> &'a NameBinding<'a> {
         arenas.alloc_name_binding(NameBinding {
             kind: NameBindingKind::Module(self.0),
@@ -54,7 +54,7 @@ impl<'a> ToNameBinding<'a> for (Module<'a>, ty::Visibility, Span, ExpnId) {
     }
 }
 
-impl<'a> ToNameBinding<'a> for (Res, ty::Visibility, Span, ExpnId) {
+impl<'a> ToNameBinding<'a> for (Res, ty::Visibility, Span, LocalExpnId) {
     fn to_name_binding(self, arenas: &'a ResolverArenas<'a>) -> &'a NameBinding<'a> {
         arenas.alloc_name_binding(NameBinding {
             kind: NameBindingKind::Res(self.0, false),
@@ -68,7 +68,7 @@ impl<'a> ToNameBinding<'a> for (Res, ty::Visibility, Span, ExpnId) {
 
 struct IsMacroExport;
 
-impl<'a> ToNameBinding<'a> for (Res, ty::Visibility, Span, ExpnId, IsMacroExport) {
+impl<'a> ToNameBinding<'a> for (Res, ty::Visibility, Span, LocalExpnId, IsMacroExport) {
     fn to_name_binding(self, arenas: &'a ResolverArenas<'a>) -> &'a NameBinding<'a> {
         arenas.alloc_name_binding(NameBinding {
             kind: NameBindingKind::Res(self.0, true),
@@ -128,7 +128,7 @@ impl<'a> Resolver<'a> {
 
         let (name, parent) = if def_id.index == CRATE_DEF_INDEX {
             // This is the crate root
-            (self.cstore().crate_name_untracked(def_id.krate), None)
+            (self.cstore().crate_name(def_id.krate), None)
         } else {
             let def_key = self.cstore().def_key(def_id);
             let name = def_key
@@ -157,8 +157,17 @@ impl<'a> Resolver<'a> {
     crate fn macro_def_scope(&mut self, expn_id: ExpnId) -> Module<'a> {
         let def_id = match expn_id.expn_data().macro_def_id {
             Some(def_id) => def_id,
-            None => return self.ast_transform_scopes.get(&expn_id).unwrap_or(&self.graph_root),
+            None => {
+                return expn_id
+                    .as_local()
+                    .and_then(|expn_id| self.ast_transform_scopes.get(&expn_id))
+                    .unwrap_or(&self.graph_root);
+            }
         };
+        self.macro_def_scope_from_def_id(def_id)
+    }
+
+    crate fn macro_def_scope_from_def_id(&mut self, def_id: DefId) -> Module<'a> {
         if let Some(id) = def_id.as_local() {
             self.local_macro_def_scopes[&id]
         } else {
@@ -186,7 +195,7 @@ impl<'a> Resolver<'a> {
     crate fn get_macro(&mut self, res: Res) -> Option<Lrc<SyntaxExtension>> {
         match res {
             Res::Def(DefKind::Macro(..), def_id) => Some(self.get_macro_by_def_id(def_id)),
-            Res::NonMacroAttr(attr_kind) => Some(self.non_macro_attr(attr_kind.is_used())),
+            Res::NonMacroAttr(_) => Some(self.non_macro_attr.clone()),
             _ => None,
         }
     }
@@ -735,7 +744,7 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
                 if ptr::eq(parent, self.r.graph_root) {
                     if let Some(entry) = self.r.extern_prelude.get(&ident.normalize_to_macros_2_0())
                     {
-                        if expansion != ExpnId::root()
+                        if expansion != LocalExpnId::ROOT
                             && orig_name.is_some()
                             && entry.extern_crate_item.is_none()
                         {
@@ -765,7 +774,13 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
                     no_implicit_prelude: parent.no_implicit_prelude || {
                         self.r.session.contains_name(&item.attrs, sym::no_implicit_prelude)
                     },
-                    ..ModuleData::new(Some(parent), module_kind, def_id, expansion, item.span)
+                    ..ModuleData::new(
+                        Some(parent),
+                        module_kind,
+                        def_id,
+                        expansion.to_expn_id(),
+                        item.span,
+                    )
                 });
                 self.r.define(parent, ident, TypeNS, (module, vis, sp, expansion));
                 self.r.module_map.insert(local_def_id, module);
@@ -804,7 +819,7 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
                     parent,
                     module_kind,
                     parent.nearest_parent_mod,
-                    expansion,
+                    expansion.to_expn_id(),
                     item.span,
                 );
                 self.r.define(parent, ident, TypeNS, (module, vis, sp, expansion));
@@ -879,7 +894,7 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
                     parent,
                     module_kind,
                     parent.nearest_parent_mod,
-                    expansion,
+                    expansion.to_expn_id(),
                     item.span,
                 );
                 self.r.define(parent, ident, TypeNS, (module, vis, sp, expansion));
@@ -922,7 +937,7 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
                 parent,
                 ModuleKind::Block(block.id),
                 parent.nearest_parent_mod,
-                expansion,
+                expansion.to_expn_id(),
                 block.span,
             );
             self.r.block_map.insert(block.id, module);
@@ -942,7 +957,7 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
                     parent,
                     ModuleKind::Def(kind, def_id, ident.name),
                     def_id,
-                    expansion,
+                    expansion.to_expn_id(),
                     span,
                 );
                 self.r.define(parent, ident, TypeNS, (module, vis, span, expansion));
@@ -1044,7 +1059,7 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
         let mut import_all = None;
         let mut single_imports = Vec::new();
         for attr in &item.attrs {
-            if self.r.session.check_name(attr, sym::macro_use) {
+            if attr.has_name(sym::macro_use) {
                 if self.parent_scope.module.parent.is_some() {
                     struct_span_err!(
                         self.r.session,
@@ -1108,7 +1123,7 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
             })
         };
 
-        let allow_shadowing = self.parent_scope.expansion == ExpnId::root();
+        let allow_shadowing = self.parent_scope.expansion == LocalExpnId::ROOT;
         if let Some(span) = import_all {
             let import = macro_use_import(self, span);
             self.r.potentially_unused_imports.push(import);
@@ -1150,7 +1165,7 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
     /// Returns `true` if this attribute list contains `macro_use`.
     fn contains_macro_use(&mut self, attrs: &[ast::Attribute]) -> bool {
         for attr in attrs {
-            if self.r.session.check_name(attr, sym::macro_escape) {
+            if attr.has_name(sym::macro_escape) {
                 let msg = "`#[macro_escape]` is a deprecated synonym for `#[macro_use]`";
                 let mut err = self.r.session.struct_span_warn(attr.span, msg);
                 if let ast::AttrStyle::Inner = attr.style {
@@ -1158,7 +1173,7 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
                 } else {
                     err.emit();
                 }
-            } else if !self.r.session.check_name(attr, sym::macro_use) {
+            } else if !attr.has_name(sym::macro_use) {
                 continue;
             }
 
@@ -1171,7 +1186,7 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
         false
     }
 
-    fn visit_invoc(&mut self, id: NodeId) -> ExpnId {
+    fn visit_invoc(&mut self, id: NodeId) -> LocalExpnId {
         let invoc_id = id.placeholder_to_expn_id();
         let old_parent_scope = self.r.invocation_parent_scopes.insert(invoc_id, self.parent_scope);
         assert!(old_parent_scope.is_none(), "invocation data is reset for an invocation");

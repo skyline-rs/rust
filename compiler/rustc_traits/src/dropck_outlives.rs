@@ -90,8 +90,8 @@ fn dropck_outlives<'tcx>(
 
                 // "outlives" represent types/regions that may be touched
                 // by a destructor.
-                result.kinds.extend(constraints.outlives.drain(..));
-                result.overflows.extend(constraints.overflows.drain(..));
+                result.kinds.append(&mut constraints.outlives);
+                result.overflows.append(&mut constraints.overflows);
 
                 // If we have even one overflow, we should stop trying to evaluate further --
                 // chances are, the subsequent overflows for this evaluation won't provide useful
@@ -163,7 +163,7 @@ fn dtorck_constraint_for_ty<'tcx>(
 ) -> Result<(), NoSolution> {
     debug!("dtorck_constraint_for_ty({:?}, {:?}, {:?}, {:?})", span, for_ty, depth, ty);
 
-    if !tcx.sess.recursion_limit().value_within_limit(depth) {
+    if !tcx.recursion_limit().value_within_limit(depth) {
         constraints.overflows.push(ty);
         return Ok(());
     }

@@ -1,7 +1,7 @@
 use crate::base::{ExtCtxt, ResolverExpand};
 
 use rustc_ast as ast;
-use rustc_ast::token::{self, Nonterminal, NtIdent, TokenKind};
+use rustc_ast::token::{self, Nonterminal, NtIdent};
 use rustc_ast::tokenstream::{self, CanSynthesizeMissingTokens};
 use rustc_ast::tokenstream::{DelimSpan, Spacing::*, TokenStream, TreeAndSpacing};
 use rustc_ast_pretty::pprust;
@@ -14,7 +14,6 @@ use rustc_parse::lexer::nfc_normalize;
 use rustc_parse::{nt_to_tokenstream, parse_stream_from_source_str};
 use rustc_session::parse::ParseSess;
 use rustc_span::def_id::CrateNum;
-use rustc_span::hygiene::ExpnId;
 use rustc_span::hygiene::ExpnKind;
 use rustc_span::symbol::{self, kw, sym, Symbol};
 use rustc_span::{BytePos, FileName, MultiSpan, Pos, RealFileName, SourceFile, Span};
@@ -179,18 +178,19 @@ impl FromInternal<(TreeAndSpacing, &'_ mut Vec<Self>, &mut Rustc<'_>)>
                 tt!(Punct::new('#', false))
             }
 
+            Interpolated(nt)
+                if let Some((name, is_raw)) = ident_name_compatibility_hack(&nt, span, rustc) =>
+            {
+                TokenTree::Ident(Ident::new(rustc.sess, name.name, is_raw, name.span))
+            }
             Interpolated(nt) => {
-                if let Some((name, is_raw)) = ident_name_compatibility_hack(&nt, span, rustc) {
-                    TokenTree::Ident(Ident::new(rustc.sess, name.name, is_raw, name.span))
-                } else {
-                    let stream = nt_to_tokenstream(&nt, rustc.sess, CanSynthesizeMissingTokens::No);
-                    TokenTree::Group(Group {
-                        delimiter: Delimiter::None,
-                        stream,
-                        span: DelimSpan::from_single(span),
-                        flatten: crate::base::pretty_printing_compatibility_hack(&nt, rustc.sess),
-                    })
-                }
+                let stream = nt_to_tokenstream(&nt, rustc.sess, CanSynthesizeMissingTokens::No);
+                TokenTree::Group(Group {
+                    delimiter: Delimiter::None,
+                    stream,
+                    span: DelimSpan::from_single(span),
+                    flatten: crate::base::pretty_printing_compatibility_hack(&nt, rustc.sess),
+                })
             }
 
             OpenDelim(..) | CloseDelim(..) => unreachable!(),
@@ -363,26 +363,20 @@ pub(crate) struct Rustc<'a> {
     mixed_site: Span,
     span_debug: bool,
     krate: CrateNum,
-    expn_id: ExpnId,
     rebased_spans: FxHashMap<usize, Span>,
 }
 
 impl<'a> Rustc<'a> {
-    pub fn new(cx: &'a ExtCtxt<'_>, krate: CrateNum) -> Self {
+    pub fn new(cx: &'a ExtCtxt<'_>) -> Self {
         let expn_data = cx.current_expansion.id.expn_data();
-        let def_site = cx.with_def_site_ctxt(expn_data.def_site);
-        let call_site = cx.with_call_site_ctxt(expn_data.call_site);
-        let mixed_site = cx.with_mixed_site_ctxt(expn_data.call_site);
-        let sess = cx.parse_sess();
         Rustc {
             resolver: cx.resolver,
-            sess,
-            def_site,
-            call_site,
-            mixed_site,
+            sess: cx.parse_sess(),
+            def_site: cx.with_def_site_ctxt(expn_data.def_site),
+            call_site: cx.with_call_site_ctxt(expn_data.call_site),
+            mixed_site: cx.with_mixed_site_ctxt(expn_data.call_site),
             span_debug: cx.ecfg.span_debug,
-            krate,
-            expn_id: cx.current_expansion.id,
+            krate: expn_data.macro_def_id.unwrap().krate,
             rebased_spans: FxHashMap::default(),
         }
     }
@@ -410,6 +404,10 @@ impl server::Types for Rustc<'_> {
 impl server::FreeFunctions for Rustc<'_> {
     fn track_env_var(&mut self, var: &str, value: Option<&str>) {
         self.sess.env_depinfo.borrow_mut().insert((Symbol::intern(var), value.map(Symbol::intern)));
+    }
+
+    fn track_path(&mut self, path: &str) {
+        self.sess.file_depinfo.borrow_mut().insert(Symbol::intern(path));
     }
 }
 
@@ -540,31 +538,53 @@ impl server::Ident for Rustc<'_> {
 
 impl server::Literal for Rustc<'_> {
     fn from_str(&mut self, s: &str) -> Result<Self::Literal, ()> {
-        let override_span = None;
-        let stream = parse_stream_from_source_str(
-            FileName::proc_macro_source_code(s),
-            s.to_owned(),
-            self.sess,
-            override_span,
-        );
-        if stream.len() != 1 {
-            return Err(());
-        }
-        let tree = stream.into_trees().next().unwrap();
-        let token = match tree {
-            tokenstream::TokenTree::Token(token) => token,
-            tokenstream::TokenTree::Delimited { .. } => return Err(()),
-        };
-        let span_data = token.span.data();
-        if (span_data.hi.0 - span_data.lo.0) as usize != s.len() {
-            // There is a comment or whitespace adjacent to the literal.
-            return Err(());
-        }
-        let lit = match token.kind {
-            TokenKind::Literal(lit) => lit,
+        let name = FileName::proc_macro_source_code(s);
+        let mut parser = rustc_parse::new_parser_from_source_str(self.sess, name, s.to_owned());
+
+        let first_span = parser.token.span.data();
+        let minus_present = parser.eat(&token::BinOp(token::Minus));
+
+        let lit_span = parser.token.span.data();
+        let mut lit = match parser.token.kind {
+            token::Literal(lit) => lit,
             _ => return Err(()),
         };
+
+        // Check no comment or whitespace surrounding the (possibly negative)
+        // literal, or more tokens after it.
+        if (lit_span.hi.0 - first_span.lo.0) as usize != s.len() {
+            return Err(());
+        }
+
+        if minus_present {
+            // If minus is present, check no comment or whitespace in between it
+            // and the literal token.
+            if first_span.hi.0 != lit_span.lo.0 {
+                return Err(());
+            }
+
+            // Check literal is a kind we allow to be negated in a proc macro token.
+            match lit.kind {
+                token::LitKind::Bool
+                | token::LitKind::Byte
+                | token::LitKind::Char
+                | token::LitKind::Str
+                | token::LitKind::StrRaw(_)
+                | token::LitKind::ByteStr
+                | token::LitKind::ByteStrRaw(_)
+                | token::LitKind::Err => return Err(()),
+                token::LitKind::Integer | token::LitKind::Float => {}
+            }
+
+            // Synthesize a new symbol that includes the minus sign.
+            let symbol = Symbol::intern(&s[..1 + lit.symbol.len()]);
+            lit = token::Lit::new(lit.kind, symbol, lit.suffix);
+        }
+
         Ok(Literal { lit, span: self.call_site })
+    }
+    fn to_string(&mut self, literal: &Self::Literal) -> String {
+        literal.lit.to_string()
     }
     fn debug_kind(&mut self, literal: &Self::Literal) -> String {
         format!("{:?}", literal.lit.kind)
@@ -778,25 +798,15 @@ impl server::Span for Rustc<'_> {
     /// span from the metadata of `my_proc_macro` (which we have access to,
     /// since we've loaded `my_proc_macro` from disk in order to execute it).
     /// In this way, we have obtained a span pointing into `my_proc_macro`
-    fn save_span(&mut self, mut span: Self::Span) -> usize {
-        // Throw away the `SyntaxContext`, since we currently
-        // skip serializing `SyntaxContext`s for proc-macro crates
-        span = span.with_ctxt(rustc_span::SyntaxContext::root());
+    fn save_span(&mut self, span: Self::Span) -> usize {
         self.sess.save_proc_macro_span(span)
     }
     fn recover_proc_macro_span(&mut self, id: usize) -> Self::Span {
-        let resolver = self.resolver;
-        let krate = self.krate;
-        let expn_id = self.expn_id;
+        let (resolver, krate, def_site) = (self.resolver, self.krate, self.def_site);
         *self.rebased_spans.entry(id).or_insert_with(|| {
-            let raw_span = resolver.get_proc_macro_quoted_span(krate, id);
-            // Ignore the deserialized `SyntaxContext` entirely.
-            // FIXME: Preserve the macro backtrace from the serialized span
-            // For example, if a proc-macro crate has code like
-            // `macro_one!() -> macro_two!() -> quote!()`, we might
-            // want to 'concatenate' this backtrace with the backtrace from
-            // our current call site.
-            raw_span.with_def_site_ctxt(expn_id)
+            // FIXME: `SyntaxContext` for spans from proc macro crates is lost during encoding,
+            // replace it with a def-site context until we are encoding it properly.
+            resolver.get_proc_macro_quoted_span(krate, id).with_ctxt(def_site.ctxt())
         })
     }
 }
@@ -808,7 +818,7 @@ fn ident_name_compatibility_hack(
     rustc: &mut Rustc<'_>,
 ) -> Option<(rustc_span::symbol::Ident, bool)> {
     if let NtIdent(ident, is_raw) = nt {
-        if let ExpnKind::Macro { name: macro_name, .. } = orig_span.ctxt().outer_expn_data().kind {
+        if let ExpnKind::Macro(_, macro_name) = orig_span.ctxt().outer_expn_data().kind {
             let source_map = rustc.sess.source_map();
             let filename = source_map.span_to_filename(orig_span);
             if let FileName::Real(RealFileName::LocalPath(path)) = filename {
@@ -847,7 +857,7 @@ fn ident_name_compatibility_hack(
                                 .flat_map(|c| c.as_os_str().to_str())
                                 .find(|c| c.starts_with("js-sys"))
                             {
-                                let mut version = c.trim_start_matches("js-sys-").split(".");
+                                let mut version = c.trim_start_matches("js-sys-").split('.');
                                 if version.next() == Some("0")
                                     && version.next() == Some("3")
                                     && version

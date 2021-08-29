@@ -9,7 +9,7 @@ LL | | };
    |
    = note: The rules on what exactly is undefined behavior aren't clear, so this check might be overzealous. Please open an issue on the rustc repository if you believe it should not be considered undefined behavior.
    = note: the raw bytes of the constant (size: 8, align: 8) {
-               ╾───────alloc0────────╼                         │ ╾──────╼
+               ╾───────alloc1────────╼                         │ ╾──────╼
            }
 
 error: could not evaluate constant pattern
@@ -29,7 +29,7 @@ LL | | };
    |
    = note: The rules on what exactly is undefined behavior aren't clear, so this check might be overzealous. Please open an issue on the rustc repository if you believe it should not be considered undefined behavior.
    = note: the raw bytes of the constant (size: 8, align: 8) {
-               ╾───────alloc0────────╼                         │ ╾──────╼
+               ╾───────alloc1────────╼                         │ ╾──────╼
            }
 
 error: could not evaluate constant pattern
@@ -65,11 +65,11 @@ LL |         U8_MUT2 => true,
    |         ^^^^^^^
 
 warning: any use of this value will cause an error
-  --> $DIR/const_refers_to_static_cross_crate.rs:32:51
+  --> $DIR/const_refers_to_static_cross_crate.rs:32:20
    |
 LL | / const U8_MUT3: &u8 = {
 LL | |     unsafe { match static_cross_crate::OPT_ZERO { Some(ref u) => u, None => panic!() } }
-   | |                                                   ^^^^^^^^^^^ constant accesses static
+   | |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ constant accesses static
 LL | |
 LL | |
 LL | |

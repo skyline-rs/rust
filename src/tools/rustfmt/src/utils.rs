@@ -6,7 +6,7 @@ use rustc_ast::ast::{
 };
 use rustc_ast::ptr;
 use rustc_ast_pretty::pprust;
-use rustc_span::{sym, symbol, BytePos, ExpnId, Span, Symbol, SyntaxContext};
+use rustc_span::{sym, symbol, BytePos, LocalExpnId, Span, Symbol, SyntaxContext};
 use unicode_width::UnicodeWidthStr;
 
 use crate::comment::{filter_normal_code, CharClasses, FullCodeCharKind, LineClasses};
@@ -191,7 +191,7 @@ pub(crate) fn outer_attributes(attrs: &[ast::Attribute]) -> Vec<ast::Attribute> 
 
 #[inline]
 pub(crate) fn is_single_line(s: &str) -> bool {
-    s.chars().find(|&c| c == '\n').is_none()
+    !s.chars().any(|c| c == '\n')
 }
 
 #[inline]
@@ -260,8 +260,7 @@ fn is_skip(meta_item: &MetaItem) -> bool {
     match meta_item.kind {
         MetaItemKind::Word => {
             let path_str = pprust::path_to_string(&meta_item.path);
-            path_str == &*skip_annotation().as_str()
-                || path_str == &*depr_skip_annotation().as_str()
+            path_str == *skip_annotation().as_str() || path_str == *depr_skip_annotation().as_str()
         }
         MetaItemKind::List(ref l) => {
             meta_item.has_name(sym::cfg_attr) && l.len() == 2 && is_skip_nested(&l[1])
@@ -675,7 +674,7 @@ pub(crate) trait NodeIdExt {
 
 impl NodeIdExt for NodeId {
     fn root() -> NodeId {
-        NodeId::placeholder_from_expn_id(ExpnId::root())
+        NodeId::placeholder_from_expn_id(LocalExpnId::ROOT)
     }
 }
 

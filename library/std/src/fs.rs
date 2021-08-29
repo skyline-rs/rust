@@ -88,6 +88,7 @@ use crate::time::SystemTime;
 /// [`BufReader<R>`]: io::BufReader
 /// [`sync_all`]: File::sync_all
 #[stable(feature = "rust1", since = "1.0.0")]
+#[cfg_attr(not(test), rustc_diagnostic_item = "File")]
 pub struct File {
     inner: fs_imp::File,
 }
@@ -183,12 +184,14 @@ pub struct Permissions(fs_imp::FilePermissions);
 /// It is returned by [`Metadata::file_type`] method.
 #[stable(feature = "file_type", since = "1.1.0")]
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(not(test), rustc_diagnostic_item = "FileType")]
 pub struct FileType(fs_imp::FileType);
 
 /// A builder used to create directories in various manners.
 ///
 /// This builder also supports platform-specific options.
 #[stable(feature = "dir_builder", since = "1.6.0")]
+#[cfg_attr(not(test), rustc_diagnostic_item = "DirBuilder")]
 #[derive(Debug)]
 pub struct DirBuilder {
     inner: fs_imp::DirBuilder,
@@ -416,7 +419,7 @@ impl File {
         self.inner.fsync()
     }
 
-    /// This function is similar to [`sync_all`], except that it may not
+    /// This function is similar to [`sync_all`], except that it might not
     /// synchronize file metadata to the filesystem.
     ///
     /// This is intended for use cases that must synchronize content, but don't
@@ -583,6 +586,12 @@ impl File {
         self.inner.set_permissions(perm.0)
     }
 }
+
+// In addition to the `impl`s here, `File` also has `impl`s for
+// `AsFd`/`From<OwnedFd>`/`Into<OwnedFd>` and
+// `AsRawFd`/`IntoRawFd`/`FromRawFd`, on Unix and WASI, and
+// `AsHandle`/`From<OwnedHandle>`/`Into<OwnedHandle>` and
+// `AsRawHandle`/`IntoRawHandle`/`FromRawHandle` on Windows.
 
 impl AsInner<fs_imp::File> for File {
     fn as_inner(&self) -> &fs_imp::File {
@@ -880,8 +889,7 @@ impl OpenOptions {
     /// This function will return an error under a number of different
     /// circumstances. Some of these error conditions are listed here, together
     /// with their [`io::ErrorKind`]. The mapping to [`io::ErrorKind`]s is not
-    /// part of the compatibility contract of the function, especially the
-    /// [`Other`] kind might change to more specific kinds in the future.
+    /// part of the compatibility contract of the function.
     ///
     /// * [`NotFound`]: The specified file does not exist and neither `create`
     ///   or `create_new` is set.
@@ -895,9 +903,11 @@ impl OpenOptions {
     ///   exists.
     /// * [`InvalidInput`]: Invalid combinations of open options (truncate
     ///   without write access, no access mode set, etc.).
-    /// * [`Other`]: One of the directory components of the specified file path
+    ///
+    /// The following errors don't match any existing [`io::ErrorKind`] at the moment:
+    /// * One of the directory components of the specified file path
     ///   was not, in fact, a directory.
-    /// * [`Other`]: Filesystem-level errors: full disk, write permission
+    /// * Filesystem-level errors: full disk, write permission
     ///   requested on a read-only file system, exceeded disk quota, too many
     ///   open files, too long filename, too many symbolic links in the
     ///   specified path (Unix-like systems only), etc.
@@ -913,7 +923,6 @@ impl OpenOptions {
     /// [`AlreadyExists`]: io::ErrorKind::AlreadyExists
     /// [`InvalidInput`]: io::ErrorKind::InvalidInput
     /// [`NotFound`]: io::ErrorKind::NotFound
-    /// [`Other`]: io::ErrorKind::Other
     /// [`PermissionDenied`]: io::ErrorKind::PermissionDenied
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn open<P: AsRef<Path>>(&self, path: P) -> io::Result<File> {
@@ -1078,7 +1087,7 @@ impl Metadata {
     ///
     /// # Errors
     ///
-    /// This field may not be available on all platforms, and will return an
+    /// This field might not be available on all platforms, and will return an
     /// `Err` on platforms where it is not available.
     ///
     /// # Examples
@@ -1113,7 +1122,7 @@ impl Metadata {
     ///
     /// # Errors
     ///
-    /// This field may not be available on all platforms, and will return an
+    /// This field might not be available on all platforms, and will return an
     /// `Err` on platforms where it is not available.
     ///
     /// # Examples
@@ -1145,7 +1154,7 @@ impl Metadata {
     ///
     /// # Errors
     ///
-    /// This field may not be available on all platforms, and will return an
+    /// This field might not be available on all platforms, and will return an
     /// `Err` on platforms or filesystems where it is not available.
     ///
     /// # Examples
@@ -1551,7 +1560,6 @@ impl AsInner<fs_imp::DirEntry> for DirEntry {
 ///     Ok(())
 /// }
 /// ```
-#[doc(alias = "delete")]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn remove_file<P: AsRef<Path>>(path: P) -> io::Result<()> {
     fs_imp::unlink(path.as_ref())
@@ -1737,8 +1745,11 @@ pub fn copy<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<u64> {
 ///
 /// # Platform-specific behavior
 ///
-/// This function currently corresponds to the `linkat` function with no flags
-/// on Unix and the `CreateHardLink` function on Windows.
+/// This function currently corresponds the `CreateHardLink` function on Windows.
+/// On most Unix systems, it corresponds to the `linkat` function with no flags.
+/// On Android, VxWorks, and Redox, it instead corresponds to the `link` function.
+/// On MacOS, it uses the `linkat` function if it is available, but on very old
+/// systems where `linkat` is not available, `link` is selected at runtime instead.
 /// Note that, this [may change in the future][changes].
 ///
 /// [changes]: io#platform-specific-behavior
@@ -1907,6 +1918,7 @@ pub fn canonicalize<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
 ///     Ok(())
 /// }
 /// ```
+#[doc(alias = "mkdir")]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn create_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
     DirBuilder::new().create(path.as_ref())
@@ -1986,7 +1998,7 @@ pub fn create_dir_all<P: AsRef<Path>>(path: P) -> io::Result<()> {
 ///     Ok(())
 /// }
 /// ```
-#[doc(alias = "delete")]
+#[doc(alias = "rmdir")]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
     fs_imp::rmdir(path.as_ref())
@@ -2024,7 +2036,6 @@ pub fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
 ///     Ok(())
 /// }
 /// ```
-#[doc(alias = "delete")]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn remove_dir_all<P: AsRef<Path>>(path: P) -> io::Result<()> {
     fs_imp::remove_dir_all(path.as_ref())
@@ -2034,6 +2045,8 @@ pub fn remove_dir_all<P: AsRef<Path>>(path: P) -> io::Result<()> {
 ///
 /// The iterator will yield instances of [`io::Result`]`<`[`DirEntry`]`>`.
 /// New errors may be encountered after an iterator is initially constructed.
+/// Entries for the current and parent directories (typically `.` and `..`) are
+/// skipped.
 ///
 /// # Platform-specific behavior
 ///
@@ -2216,7 +2229,7 @@ impl DirBuilder {
             Some(p) => self.create_dir_all(p)?,
             None => {
                 return Err(io::Error::new_const(
-                    io::ErrorKind::Other,
+                    io::ErrorKind::Uncategorized,
                     &"failed to create whole tree",
                 ));
             }

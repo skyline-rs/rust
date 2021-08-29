@@ -313,7 +313,7 @@ pub trait Visitor<'v>: Sized {
     }
 
     /// When invoking `visit_all_item_likes()`, you need to supply an
-    /// item-like visitor. This method converts a "intra-visit"
+    /// item-like visitor. This method converts an "intra-visit"
     /// visitor into an item-like visitor that walks the entire tree.
     /// If you use this, you probably don't want to process the
     /// contents of nested item-like things, since the outer loop will
@@ -436,11 +436,15 @@ pub trait Visitor<'v>: Sized {
     fn visit_label(&mut self, label: &'v Label) {
         walk_label(self, label)
     }
+    fn visit_infer(&mut self, inf: &'v InferArg) {
+        walk_inf(self, inf);
+    }
     fn visit_generic_arg(&mut self, generic_arg: &'v GenericArg<'v>) {
         match generic_arg {
             GenericArg::Lifetime(lt) => self.visit_lifetime(lt),
             GenericArg::Type(ty) => self.visit_ty(ty),
             GenericArg::Const(ct) => self.visit_anon_const(&ct.value),
+            GenericArg::Infer(inf) => self.visit_infer(inf),
         }
     }
     fn visit_lifetime(&mut self, lifetime: &'v Lifetime) {
@@ -462,9 +466,6 @@ pub trait Visitor<'v>: Sized {
         walk_assoc_type_binding(self, type_binding)
     }
     fn visit_attribute(&mut self, _id: HirId, _attr: &'v Attribute) {}
-    fn visit_macro_def(&mut self, macro_def: &'v MacroDef<'v>) {
-        walk_macro_def(self, macro_def)
-    }
     fn visit_vis(&mut self, vis: &'v Visibility<'v>) {
         walk_vis(self, vis)
     }
@@ -478,18 +479,13 @@ pub trait Visitor<'v>: Sized {
 
 /// Walks the contents of a crate. See also `Crate::visit_all_items`.
 pub fn walk_crate<'v, V: Visitor<'v>>(visitor: &mut V, krate: &'v Crate<'v>) {
-    visitor.visit_mod(&krate.item, krate.item.inner, CRATE_HIR_ID);
-    walk_list!(visitor, visit_macro_def, krate.exported_macros);
+    let top_mod = krate.module();
+    visitor.visit_mod(top_mod, top_mod.inner, CRATE_HIR_ID);
     for (&id, attrs) in krate.attrs.iter() {
         for a in *attrs {
             visitor.visit_attribute(id, a)
         }
     }
-}
-
-pub fn walk_macro_def<'v, V: Visitor<'v>>(visitor: &mut V, macro_def: &'v MacroDef<'v>) {
-    visitor.visit_id(macro_def.hir_id());
-    visitor.visit_ident(macro_def.ident);
 }
 
 pub fn walk_mod<'v, V: Visitor<'v>>(visitor: &mut V, module: &'v Mod<'v>, mod_hir_id: HirId) {
@@ -581,6 +577,9 @@ pub fn walk_item<'v, V: Visitor<'v>>(visitor: &mut V, item: &'v Item<'v>) {
             item.span,
             item.hir_id(),
         ),
+        ItemKind::Macro(_) => {
+            visitor.visit_id(item.hir_id());
+        }
         ItemKind::Mod(ref module) => {
             // `visit_mod()` takes care of visiting the `Item`'s `HirId`.
             visitor.visit_mod(module, item.span, item.hir_id())
@@ -746,6 +745,10 @@ pub fn walk_ty<'v, V: Visitor<'v>>(visitor: &mut V, typ: &'v Ty<'v>) {
     }
 }
 
+pub fn walk_inf<'v, V: Visitor<'v>>(visitor: &mut V, inf: &'v InferArg) {
+    visitor.visit_id(inf.hir_id);
+}
+
 pub fn walk_qpath<'v, V: Visitor<'v>>(
     visitor: &mut V,
     qpath: &'v QPath<'v>,
@@ -880,6 +883,7 @@ pub fn walk_param_bound<'v, V: Visitor<'v>>(visitor: &mut V, bound: &'v GenericB
             visitor.visit_generic_args(span, args);
         }
         GenericBound::Outlives(ref lifetime) => visitor.visit_lifetime(lifetime),
+        GenericBound::Unsized(_) => {}
     }
 }
 
@@ -1152,6 +1156,10 @@ pub fn walk_expr<'v, V: Visitor<'v>>(visitor: &mut V, expression: &'v Expr<'v>) 
         }
         ExprKind::DropTemps(ref subexpression) => {
             visitor.visit_expr(subexpression);
+        }
+        ExprKind::Let(ref pat, ref expr, _) => {
+            visitor.visit_expr(expr);
+            visitor.visit_pat(pat);
         }
         ExprKind::If(ref cond, ref then, ref else_opt) => {
             visitor.visit_expr(cond);

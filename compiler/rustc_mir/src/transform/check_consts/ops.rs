@@ -86,7 +86,7 @@ impl NonConstOp for FnCallNonConst {
     }
 }
 
-/// A call to a `#[unstable]` const fn or `#[rustc_const_unstable]` function.
+/// A call to an `#[unstable]` const fn or `#[rustc_const_unstable]` function.
 ///
 /// Contains the name of the feature that would allow the use of this function.
 #[derive(Debug)]
@@ -255,7 +255,7 @@ impl NonConstOp for CellBorrow {
         );
         err.span_label(
             span,
-            format!("this borrow of an interior mutable value may end up in the final value"),
+            "this borrow of an interior mutable value may end up in the final value",
         );
         if let hir::ConstContext::Static(_) = ccx.const_kind() {
             err.help(
@@ -397,6 +397,9 @@ impl NonConstOp for PanicNonStr {
     }
 }
 
+/// Comparing raw pointers for equality.
+/// Not currently intended to ever be allowed, even behind a feature gate: operation depends on
+/// allocation base addresses that are not known at compile-time.
 #[derive(Debug)]
 pub struct RawPtrComparison;
 impl NonConstOp for RawPtrComparison {
@@ -430,20 +433,22 @@ impl NonConstOp for RawPtrDeref {
     }
 }
 
+/// Casting raw pointer or function pointer to an integer.
+/// Not currently intended to ever be allowed, even behind a feature gate: operation depends on
+/// allocation base addresses that are not known at compile-time.
 #[derive(Debug)]
 pub struct RawPtrToIntCast;
 impl NonConstOp for RawPtrToIntCast {
-    fn status_in_item(&self, _: &ConstCx<'_, '_>) -> Status {
-        Status::Unstable(sym::const_raw_ptr_to_usize_cast)
-    }
-
     fn build_error(&self, ccx: &ConstCx<'_, 'tcx>, span: Span) -> DiagnosticBuilder<'tcx> {
-        feature_err(
-            &ccx.tcx.sess.parse_sess,
-            sym::const_raw_ptr_to_usize_cast,
-            span,
-            &format!("casting pointers to integers in {}s is unstable", ccx.const_kind(),),
-        )
+        let mut err = ccx
+            .tcx
+            .sess
+            .struct_span_err(span, "pointers cannot be cast to integers during const eval.");
+        err.note("at compile-time, pointers do not have an integer value");
+        err.note(
+            "avoiding this restriction via `transmute`, `union`, or raw pointers leads to compile-time undefined behavior",
+        );
+        err
     }
 }
 
@@ -492,51 +497,6 @@ impl NonConstOp for ThreadLocalAccess {
             E0625,
             "thread-local statics cannot be \
             accessed at compile-time"
-        )
-    }
-}
-
-#[derive(Debug)]
-pub struct Transmute;
-impl NonConstOp for Transmute {
-    fn status_in_item(&self, ccx: &ConstCx<'_, '_>) -> Status {
-        if ccx.const_kind() != hir::ConstContext::ConstFn {
-            Status::Allowed
-        } else {
-            Status::Unstable(sym::const_fn_transmute)
-        }
-    }
-
-    fn build_error(&self, ccx: &ConstCx<'_, 'tcx>, span: Span) -> DiagnosticBuilder<'tcx> {
-        let mut err = feature_err(
-            &ccx.tcx.sess.parse_sess,
-            sym::const_fn_transmute,
-            span,
-            &format!("`transmute` is not allowed in {}s", ccx.const_kind()),
-        );
-        err.note("`transmute` is only allowed in constants and statics for now");
-        err
-    }
-}
-
-#[derive(Debug)]
-pub struct UnionAccess;
-impl NonConstOp for UnionAccess {
-    fn status_in_item(&self, ccx: &ConstCx<'_, '_>) -> Status {
-        // Union accesses are stable in all contexts except `const fn`.
-        if ccx.const_kind() != hir::ConstContext::ConstFn {
-            Status::Allowed
-        } else {
-            Status::Unstable(sym::const_fn_union)
-        }
-    }
-
-    fn build_error(&self, ccx: &ConstCx<'_, 'tcx>, span: Span) -> DiagnosticBuilder<'tcx> {
-        feature_err(
-            &ccx.tcx.sess.parse_sess,
-            sym::const_fn_union,
-            span,
-            "unions in const fn are unstable",
         )
     }
 }

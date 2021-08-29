@@ -38,7 +38,8 @@ rm src/test/ui/threads-sendsync/task-stderr.rs
 rm src/test/ui/numbers-arithmetic/int-abs-overflow.rs
 rm src/test/ui/drop/drop-trait-enum.rs
 rm src/test/ui/numbers-arithmetic/issue-8460.rs
-rm src/test/incremental/change_crate_dep_kind.rs # requires -Cpanic=unwind
+rm src/test/ui/rt-explody-panic-payloads.rs
+rm src/test/incremental/change_crate_dep_kind.rs
 
 rm src/test/ui/issues/issue-28950.rs # depends on stack size optimizations
 rm src/test/ui/init-large-type.rs # same
@@ -64,6 +65,7 @@ rm src/test/incremental/lto.rs # requires lto
 
 rm -r src/test/run-make/emit-shared-files # requires the rustdoc executable in build/bin/
 rm -r src/test/run-make/unstable-flag-required # same
+rm -r src/test/run-make/emit-named-files # requires full --emit support
 
 rm src/test/pretty/asm.rs # inline asm
 rm src/test/pretty/raw-str-nonexpr.rs # same
@@ -77,7 +79,6 @@ rm src/test/ui/type-alias-impl-trait/cross_crate_ice*.rs # requires removed aux 
 
 rm src/test/ui/allocator/no_std-alloc-error-handler-default.rs # missing rust_oom definition
 rm src/test/ui/cfg/cfg-panic.rs
-rm src/test/ui/default-alloc-error-hook.rs
 rm -r src/test/ui/hygiene/
 
 rm -r src/test/ui/polymorphization/ # polymorphization not yet supported

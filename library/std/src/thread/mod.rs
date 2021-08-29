@@ -28,7 +28,7 @@
 //! When the main thread of a Rust program terminates, the entire program shuts
 //! down, even if other threads are still running. However, this module provides
 //! convenient facilities for automatically waiting for the termination of a
-//! child thread (i.e., join).
+//! thread (i.e., join).
 //!
 //! ## Spawning a thread
 //!
@@ -42,38 +42,43 @@
 //! });
 //! ```
 //!
-//! In this example, the spawned thread is "detached" from the current
-//! thread. This means that it can outlive its parent (the thread that spawned
-//! it), unless this parent is the main thread.
+//! In this example, the spawned thread is "detached," which means that there is
+//! no way for the program to learn when the spawned thread completes or otherwise
+//! terminates.
 //!
-//! The parent thread can also wait on the completion of the child
-//! thread; a call to [`spawn`] produces a [`JoinHandle`], which provides
-//! a `join` method for waiting:
+//! To learn when a thread completes, it is necessary to capture the [`JoinHandle`]
+//! object that is returned by the call to [`spawn`], which provides
+//! a `join` method that allows the caller to wait for the completion of the
+//! spawned thread:
 //!
 //! ```rust
 //! use std::thread;
 //!
-//! let child = thread::spawn(move || {
+//! let thread_join_handle = thread::spawn(move || {
 //!     // some work here
 //! });
 //! // some work here
-//! let res = child.join();
+//! let res = thread_join_handle.join();
 //! ```
 //!
 //! The [`join`] method returns a [`thread::Result`] containing [`Ok`] of the final
-//! value produced by the child thread, or [`Err`] of the value given to
-//! a call to [`panic!`] if the child panicked.
+//! value produced by the spawned thread, or [`Err`] of the value given to
+//! a call to [`panic!`] if the thread panicked.
+//!
+//! Note that there is no parent/child relationship between a thread that spawns a
+//! new thread and the thread being spawned.  In particular, the spawned thread may or
+//! may not outlive the spawning thread, unless the spawning thread is the main thread.
 //!
 //! ## Configuring threads
 //!
 //! A new thread can be configured before it is spawned via the [`Builder`] type,
-//! which currently allows you to set the name and stack size for the child thread:
+//! which currently allows you to set the name and stack size for the thread:
 //!
 //! ```rust
 //! # #![allow(unused_must_use)]
 //! use std::thread;
 //!
-//! thread::Builder::new().name("child1".to_string()).spawn(move || {
+//! thread::Builder::new().name("thread1".to_string()).spawn(move || {
 //!     println!("Hello, world!");
 //! });
 //! ```
@@ -344,7 +349,7 @@ impl Builder {
     /// The spawned thread may outlive the caller (unless the caller thread
     /// is the main thread; the whole process is terminated when the main
     /// thread finishes). The join handle can be used to block on
-    /// termination of the child thread, including recovering its panics.
+    /// termination of the spawned thread, including recovering its panics.
     ///
     /// For a more complete documentation see [`thread::spawn`][`spawn`].
     ///
@@ -389,7 +394,7 @@ impl Builder {
     /// The spawned thread may outlive the caller (unless the caller thread
     /// is the main thread; the whole process is terminated when the main
     /// thread finishes). The join handle can be used to block on
-    /// termination of the child thread, including recovering its panics.
+    /// termination of the spawned thread, including recovering its panics.
     ///
     /// This method is identical to [`thread::Builder::spawn`][`Builder::spawn`],
     /// except for the relaxed lifetime bounds, which render it unsafe.
@@ -516,15 +521,16 @@ impl Builder {
 
 /// Spawns a new thread, returning a [`JoinHandle`] for it.
 ///
-/// The join handle will implicitly *detach* the child thread upon being
-/// dropped. In this case, the child thread may outlive the parent (unless
-/// the parent thread is the main thread; the whole process is terminated when
-/// the main thread finishes). Additionally, the join handle provides a [`join`]
-/// method that can be used to join the child thread. If the child thread
-/// panics, [`join`] will return an [`Err`] containing the argument given to
-/// [`panic!`].
+/// The join handle provides a [`join`] method that can be used to join the spawned
+/// thread. If the spawned thread panics, [`join`] will return an [`Err`] containing
+/// the argument given to [`panic!`].
 ///
-/// This will create a thread using default parameters of [`Builder`], if you
+/// If the join handle is dropped, the spawned thread will implicitly be *detached*.
+/// In this case, the spawned thread may no longer be joined.
+/// (It is the responsibility of the program to either eventually join threads it
+/// creates or detach them; otherwise, a resource leak will result.)
+///
+/// This call will create a thread using default parameters of [`Builder`], if you
 /// want to specify the stack size or the name of the thread, use this API
 /// instead.
 ///
@@ -533,8 +539,8 @@ impl Builder {
 ///
 /// - The `'static` constraint means that the closure and its return value
 ///   must have a lifetime of the whole program execution. The reason for this
-///   is that threads can `detach` and outlive the lifetime they have been
-///   created in.
+///   is that threads can outlive the lifetime they have been created in.
+///
 ///   Indeed if the thread, and by extension its return value, can outlive their
 ///   caller, we need to make sure that they will be valid afterwards, and since
 ///   we *can't* know when it will return we need to have them valid as long as
@@ -651,22 +657,23 @@ pub fn current() -> Thread {
 
 /// Cooperatively gives up a timeslice to the OS scheduler.
 ///
-/// This is used when the programmer knows that the thread will have nothing
-/// to do for some time, and thus avoid wasting computing time.
+/// This calls the underlying OS scheduler's yield primitive, signaling
+/// that the calling thread is willing to give up its remaining timeslice
+/// so that the OS may schedule other threads on the CPU.
 ///
-/// For example when polling on a resource, it is common to check that it is
-/// available, and if not to yield in order to avoid busy waiting.
+/// A drawback of yielding in a loop is that if the OS does not have any
+/// other ready threads to run on the current CPU, the thread will effectively
+/// busy-wait, which wastes CPU time and energy.
 ///
-/// Thus the pattern of `yield`ing after a failed poll is rather common when
-/// implementing low-level shared resources or synchronization primitives.
+/// Therefore, when waiting for events of interest, a programmer's first
+/// choice should be to use synchronization devices such as [`channel`]s,
+/// [`Condvar`]s, [`Mutex`]es or [`join`] since these primitives are
+/// implemented in a blocking manner, giving up the CPU until the event
+/// of interest has occurred which avoids repeated yielding.
 ///
-/// However programmers will usually prefer to use [`channel`]s, [`Condvar`]s,
-/// [`Mutex`]es or [`join`] for their synchronization routines, as they avoid
-/// thinking about thread scheduling.
-///
-/// Note that [`channel`]s for example are implemented using this primitive.
-/// Indeed when you call `send` or `recv`, which are blocking, they will yield
-/// if the channel is not available.
+/// `yield_now` should thus be used only rarely, mostly in situations where
+/// repeated polling is required because there is no other suitable way to
+/// learn when an event of interest has occurred.
 ///
 /// # Examples
 ///
@@ -905,7 +912,7 @@ pub fn park() {
 /// The semantics of this function are equivalent to [`park`] except
 /// that the thread will be blocked for roughly no longer than `dur`. This
 /// method should not be used for precise timing due to anomalies such as
-/// preemption or platform differences that may not cause the maximum
+/// preemption or platform differences that might not cause the maximum
 /// amount of time waited to be precisely `ms` long.
 ///
 /// See the [park documentation][`park`] for more detail.
@@ -921,7 +928,7 @@ pub fn park_timeout_ms(ms: u32) {
 /// The semantics of this function are equivalent to [`park`][park] except
 /// that the thread will be blocked for roughly no longer than `dur`. This
 /// method should not be used for precise timing due to anomalies such as
-/// preemption or platform differences that may not cause the maximum
+/// preemption or platform differences that might not cause the maximum
 /// amount of time waited to be precisely `dur` long.
 ///
 /// See the [park documentation][park] for more details.
@@ -998,11 +1005,12 @@ impl ThreadId {
         static mut COUNTER: u64 = 1;
 
         unsafe {
-            let _guard = GUARD.lock();
+            let guard = GUARD.lock();
 
             // If we somehow use up all our bits, panic so that we're not
             // covering up subtle bugs of IDs being reused.
             if COUNTER == u64::MAX {
+                drop(guard); // in case the panic handler ends up calling `ThreadId::new()`, avoid reentrant lock acquire.
                 panic!("failed to generate unique thread ID: bitspace exhausted");
             }
 
@@ -1234,10 +1242,10 @@ impl fmt::Debug for Thread {
 #[stable(feature = "rust1", since = "1.0.0")]
 pub type Result<T> = crate::result::Result<T, Box<dyn Any + Send + 'static>>;
 
-// This packet is used to communicate the return value between the child thread
-// and the parent thread. Memory is shared through the `Arc` within and there's
+// This packet is used to communicate the return value between the spawned thread
+// and the rest of the program. Memory is shared through the `Arc` within and there's
 // no need for a mutex here because synchronization happens with `join()` (the
-// parent thread never reads this packet until the child has exited).
+// caller will never read this packet until the thread has exited).
 //
 // This packet itself is then stored into a `JoinInner` which in turns is placed
 // in `JoinHandle` and `JoinGuard`. Due to the usage of `UnsafeCell` we need to
@@ -1301,7 +1309,7 @@ impl<T> JoinInner<T> {
 /// }).unwrap();
 /// ```
 ///
-/// Child being detached and outliving its parent:
+/// A thread being detached and outliving the thread that spawned it:
 ///
 /// ```no_run
 /// use std::thread;
@@ -1359,12 +1367,15 @@ impl<T> JoinHandle<T> {
 
     /// Waits for the associated thread to finish.
     ///
+    /// This function will return immediately if the associated thread has already finished.
+    ///
     /// In terms of [atomic memory orderings],  the completion of the associated
     /// thread synchronizes with this function returning. In other words, all
-    /// operations performed by that thread are ordered before all
+    /// operations performed by that thread [happen
+    /// before](https://doc.rust-lang.org/nomicon/atomics.html#data-accesses) all
     /// operations that happen after `join` returns.
     ///
-    /// If the child thread panics, [`Err`] is returned with the parameter given
+    /// If the associated thread panics, [`Err`] is returned with the parameter given
     /// to [`panic!`].
     ///
     /// [`Err`]: crate::result::Result::Err

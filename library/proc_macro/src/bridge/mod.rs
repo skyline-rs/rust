@@ -55,6 +55,7 @@ macro_rules! with_api {
             FreeFunctions {
                 fn drop($self: $S::FreeFunctions);
                 fn track_env_var(var: &str, value: Option<&str>);
+                fn track_path(path: &str);
             },
             TokenStream {
                 fn drop($self: $S::TokenStream);
@@ -108,6 +109,7 @@ macro_rules! with_api {
                 fn drop($self: $S::Literal);
                 fn clone($self: &$S::Literal) -> $S::Literal;
                 fn from_str(s: &str) -> Result<$S::Literal, ()>;
+                fn to_string($self: &$S::Literal) -> String;
                 fn debug_kind($self: &$S::Literal) -> String;
                 fn symbol($self: &$S::Literal) -> String;
                 fn suffix($self: &$S::Literal) -> Option<String>;

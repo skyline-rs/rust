@@ -26,8 +26,9 @@ use crate::marker;
 use crate::mem;
 use crate::sync::atomic::{self, AtomicUsize, Ordering};
 
-macro_rules! weak {
+pub(crate) macro weak {
     (fn $name:ident($($t:ty),*) -> $ret:ty) => (
+        #[allow(non_upper_case_globals)]
         static $name: crate::sys::weak::Weak<unsafe extern "C" fn($($t),*) -> $ret> =
             crate::sys::weak::Weak::new(concat!(stringify!($name), '\0'));
     )
@@ -101,7 +102,7 @@ unsafe fn fetch(name: &str) -> usize {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
-macro_rules! syscall {
+pub(crate) macro syscall {
     (fn $name:ident($($arg_name:ident: $t:ty),*) -> $ret:ty) => (
         unsafe fn $name($($arg_name: $t),*) -> $ret {
             use super::os;
@@ -119,9 +120,10 @@ macro_rules! syscall {
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-macro_rules! syscall {
+pub(crate) macro syscall {
     (fn $name:ident($($arg_name:ident: $t:ty),*) -> $ret:ty) => (
         unsafe fn $name($($arg_name:$t),*) -> $ret {
+            use weak;
             // This looks like a hack, but concat_idents only accepts idents
             // (not paths).
             use libc::*;

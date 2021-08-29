@@ -9,10 +9,11 @@ use rustc_middle::mir::{
     FakeReadCause, LocalDecl, LocalInfo, LocalKind, Location, Operand, Place, PlaceRef,
     ProjectionElem, Rvalue, Statement, StatementKind, Terminator, TerminatorKind, VarBindingForm,
 };
-use rustc_middle::ty::{self, suggest_constraining_type_param, Ty, TypeFoldable};
+use rustc_middle::ty::{self, suggest_constraining_type_param, Ty};
 use rustc_span::source_map::DesugaringKind;
 use rustc_span::symbol::sym;
-use rustc_span::{Span, DUMMY_SP};
+use rustc_span::{BytePos, MultiSpan, Span, DUMMY_SP};
+use rustc_trait_selection::infer::InferCtxtExt;
 
 use crate::dataflow::drop_flag_effects;
 use crate::dataflow::indexes::{MoveOutIndex, MovePathIndex};
@@ -65,7 +66,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             self.move_spans(moved_place, location).or_else(|| self.borrow_spans(span, location));
         let span = use_spans.args_or_use();
 
-        let move_site_vec = self.get_moved_indexes(location, mpi);
+        let (move_site_vec, maybe_reinitialized_locations) = self.get_moved_indexes(location, mpi);
         debug!(
             "report_use_of_moved_or_uninitialized: move_site_vec={:?} use_spans={:?}",
             move_site_vec, use_spans
@@ -137,6 +138,32 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                 partially_str,
                 self.describe_place_with_options(moved_place, IncludingDowncast(true)),
             );
+
+            let reinit_spans = maybe_reinitialized_locations
+                .iter()
+                .take(3)
+                .map(|loc| {
+                    self.move_spans(self.move_data.move_paths[mpi].place.as_ref(), *loc)
+                        .args_or_use()
+                })
+                .collect::<Vec<Span>>();
+            let reinits = maybe_reinitialized_locations.len();
+            if reinits == 1 {
+                err.span_label(reinit_spans[0], "this reinitialization might get skipped");
+            } else if reinits > 1 {
+                err.span_note(
+                    MultiSpan::from_spans(reinit_spans),
+                    &if reinits <= 3 {
+                        format!("these {} reinitializations might get skipped", reinits)
+                    } else {
+                        format!(
+                            "these 3 reinitializations and {} other{} might get skipped",
+                            reinits - 3,
+                            if reinits == 4 { "" } else { "s" }
+                        )
+                    },
+                );
+            }
 
             self.add_moved_or_invoked_closure_note(location, used_place, &mut err);
 
@@ -218,7 +245,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                                     ),
                                 );
                             }
-                            if is_option_or_result {
+                            if is_option_or_result && maybe_reinitialized_locations.is_empty() {
                                 err.span_suggestion_verbose(
                                     fn_call_span.shrink_to_lo(),
                                     "consider calling `.as_ref()` to borrow the type's contents",
@@ -259,19 +286,23 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                     }
                 }
 
-                if let UseSpans::PatUse(span) = move_spans {
-                    err.span_suggestion_verbose(
-                        span.shrink_to_lo(),
-                        &format!(
-                            "borrow this field in the pattern to avoid moving {}",
-                            self.describe_place(moved_place.as_ref())
-                                .map(|n| format!("`{}`", n))
-                                .unwrap_or_else(|| "the value".to_string())
-                        ),
-                        "ref ".to_string(),
-                        Applicability::MachineApplicable,
-                    );
-                    in_pattern = true;
+                if let (UseSpans::PatUse(span), []) =
+                    (move_spans, &maybe_reinitialized_locations[..])
+                {
+                    if maybe_reinitialized_locations.is_empty() {
+                        err.span_suggestion_verbose(
+                            span.shrink_to_lo(),
+                            &format!(
+                                "borrow this field in the pattern to avoid moving {}",
+                                self.describe_place(moved_place.as_ref())
+                                    .map(|n| format!("`{}`", n))
+                                    .unwrap_or_else(|| "the value".to_string())
+                            ),
+                            "ref ".to_string(),
+                            Applicability::MachineApplicable,
+                        );
+                        in_pattern = true;
+                    }
                 }
 
                 if let Some(DesugaringKind::ForLoop(_)) = move_span.desugaring_kind() {
@@ -289,7 +320,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                                         .map(|n| format!("`{}`", n))
                                         .unwrap_or_else(|| "the mutable reference".to_string()),
                                 ),
-                                format!("&mut *"),
+                                "&mut *".to_string(),
                                 Applicability::MachineApplicable,
                             );
                         }
@@ -794,7 +825,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                 // We're going to want to traverse the first borrowed place to see if we can find
                 // field access to a union. If we find that, then we will keep the place of the
                 // union being accessed and the field that was being accessed so we can check the
-                // second borrowed place for the same union and a access to a different field.
+                // second borrowed place for the same union and an access to a different field.
                 for (place_base, elem) in first_borrowed_place.iter_projections().rev() {
                     match elem {
                         ProjectionElem::Field(field, _) if union_ty(place_base).is_some() => {
@@ -807,7 +838,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             })
             .and_then(|(target_base, target_field)| {
                 // With the place of a union and a field access into it, we traverse the second
-                // borrowed place and look for a access to a different field of the same union.
+                // borrowed place and look for an access to a different field of the same union.
                 for (place_base, elem) in second_borrowed_place.iter_projections().rev() {
                     if let ProjectionElem::Field(field, _) = elem {
                         if let Some(union_ty) = union_ty(place_base) {
@@ -1329,18 +1360,19 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             let return_ty = tcx.erase_regions(return_ty);
 
             // to avoid panics
-            if !return_ty.has_infer_types() {
-                if let Some(iter_trait) = tcx.get_diagnostic_item(sym::Iterator) {
-                    if tcx.type_implements_trait((iter_trait, return_ty, ty_params, self.param_env))
-                    {
-                        if let Ok(snippet) = tcx.sess.source_map().span_to_snippet(return_span) {
-                            err.span_suggestion_hidden(
-                                return_span,
-                                "use `.collect()` to allocate the iterator",
-                                format!("{}{}", snippet, ".collect::<Vec<_>>()"),
-                                Applicability::MaybeIncorrect,
-                            );
-                        }
+            if let Some(iter_trait) = tcx.get_diagnostic_item(sym::Iterator) {
+                if self
+                    .infcx
+                    .type_implements_trait(iter_trait, return_ty, ty_params, self.param_env)
+                    .must_apply_modulo_regions()
+                {
+                    if let Ok(snippet) = tcx.sess.source_map().span_to_snippet(return_span) {
+                        err.span_suggestion_hidden(
+                            return_span,
+                            "use `.collect()` to allocate the iterator",
+                            format!("{}{}", snippet, ".collect::<Vec<_>>()"),
+                            Applicability::MaybeIncorrect,
+                        );
                     }
                 }
             }
@@ -1361,18 +1393,19 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         let tcx = self.infcx.tcx;
         let args_span = use_span.args_or_use();
 
-        let suggestion = match tcx.sess.source_map().span_to_snippet(args_span) {
-            Ok(mut string) => {
+        let (sugg_span, suggestion) = match tcx.sess.source_map().span_to_snippet(args_span) {
+            Ok(string) => {
                 if string.starts_with("async ") {
-                    string.insert_str(6, "move ");
+                    let pos = args_span.lo() + BytePos(6);
+                    (args_span.with_lo(pos).with_hi(pos), "move ".to_string())
                 } else if string.starts_with("async|") {
-                    string.insert_str(5, " move");
+                    let pos = args_span.lo() + BytePos(5);
+                    (args_span.with_lo(pos).with_hi(pos), " move".to_string())
                 } else {
-                    string.insert_str(0, "move ");
-                };
-                string
+                    (args_span.shrink_to_lo(), "move ".to_string())
+                }
             }
-            Err(_) => "move |<args>| <body>".to_string(),
+            Err(_) => (args_span, "move |<args>| <body>".to_string()),
         };
         let kind = match use_span.generator_kind() {
             Some(generator_kind) => match generator_kind {
@@ -1388,8 +1421,8 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
 
         let mut err =
             self.cannot_capture_in_long_lived_closure(args_span, kind, captured_var, var_span);
-        err.span_suggestion(
-            args_span,
+        err.span_suggestion_verbose(
+            sugg_span,
             &format!(
                 "to force the {} to take ownership of {} (and any \
                  other referenced variables), use the `move` keyword",
@@ -1463,7 +1496,11 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         err
     }
 
-    fn get_moved_indexes(&mut self, location: Location, mpi: MovePathIndex) -> Vec<MoveSite> {
+    fn get_moved_indexes(
+        &mut self,
+        location: Location,
+        mpi: MovePathIndex,
+    ) -> (Vec<MoveSite>, Vec<Location>) {
         fn predecessor_locations(
             body: &'a mir::Body<'tcx>,
             location: Location,
@@ -1486,6 +1523,8 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         }));
 
         let mut visited = FxHashSet::default();
+        let mut move_locations = FxHashSet::default();
+        let mut reinits = vec![];
         let mut result = vec![];
 
         'dfs: while let Some((location, is_back_edge)) = stack.pop() {
@@ -1527,6 +1566,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                             move_paths[path].place
                         );
                         result.push(MoveSite { moi: *moi, traversed_back_edge: is_back_edge });
+                        move_locations.insert(location);
 
                         // Strictly speaking, we could continue our DFS here. There may be
                         // other moves that can reach the point of error. But it is kind of
@@ -1563,6 +1603,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                 },
             );
             if any_match {
+                reinits.push(location);
                 continue 'dfs;
             }
 
@@ -1572,7 +1613,25 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             }));
         }
 
-        result
+        // Check if we can reach these reinits from a move location.
+        let reinits_reachable = reinits
+            .into_iter()
+            .filter(|reinit| {
+                let mut visited = FxHashSet::default();
+                let mut stack = vec![*reinit];
+                while let Some(location) = stack.pop() {
+                    if !visited.insert(location) {
+                        continue;
+                    }
+                    if move_locations.contains(&location) {
+                        return true;
+                    }
+                    stack.extend(predecessor_locations(self.body, location));
+                }
+                false
+            })
+            .collect::<Vec<Location>>();
+        (result, reinits_reachable)
     }
 
     pub(in crate::borrow_check) fn report_illegal_mutation_of_borrowed(

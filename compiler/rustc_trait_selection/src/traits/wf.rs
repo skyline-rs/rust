@@ -1,6 +1,7 @@
 use crate::infer::InferCtxt;
 use crate::opaque_types::required_region_bounds;
 use crate::traits;
+use rustc_data_structures::sync::Lrc;
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
 use rustc_hir::lang_items::LangItem;
@@ -9,7 +10,6 @@ use rustc_middle::ty::{self, ToPredicate, Ty, TyCtxt, TypeFoldable, WithConstnes
 use rustc_span::Span;
 
 use std::iter;
-use std::rc::Rc;
 /// Returns the set of obligations needed to make `arg` well-formed.
 /// If `arg` contains unresolved inference variables, this may include
 /// further WF obligations. However, if `arg` IS an unresolved
@@ -85,6 +85,7 @@ pub fn trait_obligations<'a, 'tcx>(
     let mut wf =
         WfPredicates { infcx, param_env, body_id, span, out: vec![], recursion_depth: 0, item };
     wf.compute_trait_ref(trait_ref, Elaborate::All);
+    debug!(obligations = ?wf.out);
     wf.normalize()
 }
 
@@ -107,7 +108,7 @@ pub fn predicate_obligations<'a, 'tcx>(
 
     // It's ok to skip the binder here because wf code is prepared for it
     match predicate.kind().skip_binder() {
-        ty::PredicateKind::Trait(t, _) => {
+        ty::PredicateKind::Trait(t) => {
             wf.compute_trait_ref(&t.trait_ref, Elaborate::None);
         }
         ty::PredicateKind::RegionOutlives(..) => {}
@@ -127,8 +128,13 @@ pub fn predicate_obligations<'a, 'tcx>(
             wf.compute(a.into());
             wf.compute(b.into());
         }
-        ty::PredicateKind::ConstEvaluatable(def, substs) => {
-            let obligations = wf.nominal_obligations(def.did, substs);
+        ty::PredicateKind::Coerce(ty::CoercePredicate { a, b }) => {
+            wf.compute(a.into());
+            wf.compute(b.into());
+        }
+        ty::PredicateKind::ConstEvaluatable(uv) => {
+            let substs = uv.substs(wf.tcx());
+            let obligations = wf.nominal_obligations(uv.def.did, substs);
             wf.out.extend(obligations);
 
             for arg in substs.iter() {
@@ -225,7 +231,7 @@ fn extend_cause_with_original_assoc_item_obligation<'tcx>(
                 }
             }
         }
-        ty::PredicateKind::Trait(pred, _) => {
+        ty::PredicateKind::Trait(pred) => {
             // An associated item obligation born out of the `trait` failed to be met. An example
             // can be seen in `ui/associated-types/point-at-type-on-obligation-failure-2.rs`.
             debug!("extended_cause_with_original_assoc_item_obligation trait proj {:?}", pred);
@@ -295,7 +301,7 @@ impl<'a, 'tcx> WfPredicates<'a, 'tcx> {
             if let Some(parent_trait_ref) = obligation.predicate.to_opt_poly_trait_ref() {
                 let derived_cause = traits::DerivedObligationCause {
                     parent_trait_ref: parent_trait_ref.value,
-                    parent_code: Rc::new(obligation.cause.code.clone()),
+                    parent_code: Lrc::new(obligation.cause.code.clone()),
                 };
                 cause.make_mut().code =
                     traits::ObligationCauseCode::DerivedObligation(derived_cause);
@@ -417,7 +423,7 @@ impl<'a, 'tcx> WfPredicates<'a, 'tcx> {
 
     /// Pushes all the predicates needed to validate that `ty` is WF into `out`.
     fn compute(&mut self, arg: GenericArg<'tcx>) {
-        let mut walker = arg.walk();
+        let mut walker = arg.walk(self.tcx());
         let param_env = self.param_env;
         let depth = self.recursion_depth;
         while let Some(arg) = walker.next() {
@@ -430,14 +436,17 @@ impl<'a, 'tcx> WfPredicates<'a, 'tcx> {
 
                 GenericArgKind::Const(constant) => {
                     match constant.val {
-                        ty::ConstKind::Unevaluated(ty::Unevaluated { def, substs, promoted }) => {
-                            assert!(promoted.is_none());
+                        ty::ConstKind::Unevaluated(uv) => {
+                            assert!(uv.promoted.is_none());
+                            let substs = uv.substs(self.tcx());
 
-                            let obligations = self.nominal_obligations(def.did, substs);
+                            let obligations = self.nominal_obligations(uv.def.did, substs);
                             self.out.extend(obligations);
 
-                            let predicate = ty::PredicateKind::ConstEvaluatable(def, substs)
-                                .to_predicate(self.tcx());
+                            let predicate = ty::PredicateKind::ConstEvaluatable(
+                                ty::Unevaluated::new(uv.def, substs),
+                            )
+                            .to_predicate(self.tcx());
                             let cause = self.cause(traits::MiscObligation);
                             self.out.push(traits::Obligation::with_depth(
                                 cause,

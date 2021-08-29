@@ -4,20 +4,15 @@ use rustc_ast as ast;
 use rustc_ast::util::parser;
 use rustc_ast::{ExprKind, StmtKind};
 use rustc_ast_pretty::pprust;
-use rustc_data_structures::fx::FxHashMap;
 use rustc_errors::{pluralize, Applicability};
-use rustc_feature::{AttributeType, BuiltinAttribute, BUILTIN_ATTRIBUTE_MAP};
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::DefId;
 use rustc_middle::ty::adjustment;
 use rustc_middle::ty::{self, Ty};
-use rustc_session::lint::builtin::UNUSED_ATTRIBUTES;
 use rustc_span::symbol::Symbol;
 use rustc_span::symbol::{kw, sym};
 use rustc_span::{BytePos, Span, DUMMY_SP};
-
-use tracing::debug;
 
 declare_lint! {
     /// The `unused_must_use` lint detects unused result of a type flagged as
@@ -161,7 +156,15 @@ impl<'tcx> LateLintPass<'tcx> for UnusedResults {
 
         if let Some(must_use_op) = must_use_op {
             cx.struct_span_lint(UNUSED_MUST_USE, expr.span, |lint| {
-                lint.build(&format!("unused {} that must be used", must_use_op)).emit()
+                let mut lint = lint.build(&format!("unused {} that must be used", must_use_op));
+                lint.span_label(expr.span, &format!("the {} produces a value", must_use_op));
+                lint.span_suggestion_verbose(
+                    expr.span.shrink_to_lo(),
+                    "use `let _ = ...` to ignore the resulting value",
+                    "let _ = ".to_string(),
+                    Applicability::MachineApplicable,
+                );
+                lint.emit();
             });
             op_warned = true;
         }
@@ -203,7 +206,7 @@ impl<'tcx> LateLintPass<'tcx> for UnusedResults {
                     let mut has_emitted = false;
                     for &(predicate, _) in cx.tcx.explicit_item_bounds(def) {
                         // We only look at the `DefId`, so it is safe to skip the binder here.
-                        if let ty::PredicateKind::Trait(ref poly_trait_predicate, _) =
+                        if let ty::PredicateKind::Trait(ref poly_trait_predicate) =
                             predicate.kind().skip_binder()
                         {
                             let def_id = poly_trait_predicate.trait_ref.def_id;
@@ -300,7 +303,7 @@ impl<'tcx> LateLintPass<'tcx> for UnusedResults {
             descr_post_path: &str,
         ) -> bool {
             for attr in cx.tcx.get_attrs(def_id).iter() {
-                if cx.sess().check_name(attr, sym::must_use) {
+                if attr.has_name(sym::must_use) {
                     cx.struct_span_lint(UNUSED_MUST_USE, span, |lint| {
                         let msg = format!(
                             "unused {}`{}`{} that must be used",
@@ -370,62 +373,6 @@ impl<'tcx> LateLintPass<'tcx> for PathStatements {
                     }
                 });
             }
-        }
-    }
-}
-
-#[derive(Copy, Clone)]
-pub struct UnusedAttributes {
-    builtin_attributes: &'static FxHashMap<Symbol, &'static BuiltinAttribute>,
-}
-
-impl UnusedAttributes {
-    pub fn new() -> Self {
-        UnusedAttributes { builtin_attributes: &*BUILTIN_ATTRIBUTE_MAP }
-    }
-}
-
-impl_lint_pass!(UnusedAttributes => [UNUSED_ATTRIBUTES]);
-
-impl<'tcx> LateLintPass<'tcx> for UnusedAttributes {
-    fn check_attribute(&mut self, cx: &LateContext<'_>, attr: &ast::Attribute) {
-        debug!("checking attribute: {:?}", attr);
-
-        if attr.is_doc_comment() {
-            return;
-        }
-
-        let attr_info = attr.ident().and_then(|ident| self.builtin_attributes.get(&ident.name));
-
-        if let Some(&&(name, ty, ..)) = attr_info {
-            if let AttributeType::AssumedUsed = ty {
-                debug!("{:?} is AssumedUsed", name);
-                return;
-            }
-        }
-
-        if !cx.sess().is_attr_used(attr) {
-            debug!("emitting warning for: {:?}", attr);
-            cx.struct_span_lint(UNUSED_ATTRIBUTES, attr.span, |lint| {
-                // Mark as used to avoid duplicate warnings.
-                cx.sess().mark_attr_used(attr);
-                lint.build("unused attribute").emit()
-            });
-            // Is it a builtin attribute that must be used at the crate level?
-            if attr_info.map_or(false, |(_, ty, ..)| ty == &AttributeType::CrateLevel) {
-                cx.struct_span_lint(UNUSED_ATTRIBUTES, attr.span, |lint| {
-                    let msg = match attr.style {
-                        ast::AttrStyle::Outer => {
-                            "crate-level attribute should be an inner attribute: add an exclamation \
-                             mark: `#![foo]`"
-                        }
-                        ast::AttrStyle::Inner => "crate-level attribute should be in the root module",
-                    };
-                    lint.build(msg).emit()
-                });
-            }
-        } else {
-            debug!("Attr was used: {:?}", attr);
         }
     }
 }
@@ -606,7 +553,8 @@ trait UnusedDelimLint {
         let (value, ctx, followed_by_block, left_pos, right_pos) = match e.kind {
             // Do not lint `unused_braces` in `if let` expressions.
             If(ref cond, ref block, _)
-                if !matches!(cond.kind, Let(_, _)) || Self::LINT_EXPR_IN_PATTERN_MATCHING_CTX =>
+                if !matches!(cond.kind, Let(_, _, _))
+                    || Self::LINT_EXPR_IN_PATTERN_MATCHING_CTX =>
             {
                 let left = e.span.lo() + rustc_span::BytePos(2);
                 let right = block.span.lo();
@@ -615,7 +563,8 @@ trait UnusedDelimLint {
 
             // Do not lint `unused_braces` in `while let` expressions.
             While(ref cond, ref block, ..)
-                if !matches!(cond.kind, Let(_, _)) || Self::LINT_EXPR_IN_PATTERN_MATCHING_CTX =>
+                if !matches!(cond.kind, Let(_, _, _))
+                    || Self::LINT_EXPR_IN_PATTERN_MATCHING_CTX =>
             {
                 let left = e.span.lo() + rustc_span::BytePos(5);
                 let right = block.span.lo();
@@ -766,7 +715,7 @@ impl UnusedDelimLint for UnusedParens {
                     self.emit_unused_delims_expr(cx, value, ctx, left_pos, right_pos)
                 }
             }
-            ast::ExprKind::Let(_, ref expr) => {
+            ast::ExprKind::Let(_, ref expr, _) => {
                 self.check_unused_delims_expr(
                     cx,
                     expr,
@@ -820,7 +769,7 @@ impl UnusedParens {
 impl EarlyLintPass for UnusedParens {
     fn check_expr(&mut self, cx: &EarlyContext<'_>, e: &ast::Expr) {
         match e.kind {
-            ExprKind::Let(ref pat, _) | ExprKind::ForLoop(ref pat, ..) => {
+            ExprKind::Let(ref pat, _, _) | ExprKind::ForLoop(ref pat, ..) => {
                 self.check_unused_parens_pat(cx, pat, false, false);
             }
             // We ignore parens in cases like `if (((let Some(0) = Some(1))))` because we already
@@ -1004,7 +953,7 @@ impl UnusedDelimLint for UnusedBraces {
                     }
                 }
             }
-            ast::ExprKind::Let(_, ref expr) => {
+            ast::ExprKind::Let(_, ref expr, _) => {
                 self.check_unused_delims_expr(
                     cx,
                     expr,

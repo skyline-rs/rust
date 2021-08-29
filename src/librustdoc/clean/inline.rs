@@ -13,10 +13,9 @@ use rustc_metadata::creader::LoadedMacro;
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_span::hygiene::MacroKind;
 use rustc_span::symbol::{kw, sym, Symbol};
-use rustc_span::Span;
 
 use crate::clean::{
-    self, Attributes, AttributesExt, FakeDefId, GetDefId, NestedAttributesExt, ToSource, Type,
+    self, utils, Attributes, AttributesExt, GetDefId, ItemId, NestedAttributesExt, Type,
 };
 use crate::core::DocContext;
 use crate::formats::item_type::ItemType;
@@ -42,6 +41,7 @@ type Attrs<'hir> = rustc_middle::ty::Attributes<'hir>;
 crate fn try_inline(
     cx: &mut DocContext<'_>,
     parent_module: DefId,
+    import_def_id: Option<DefId>,
     res: Res,
     name: Symbol,
     attrs: Option<Attrs<'_>>,
@@ -109,7 +109,7 @@ crate fn try_inline(
             clean::ConstantItem(build_const(cx, did))
         }
         Res::Def(DefKind::Macro(kind), did) => {
-            let mac = build_macro(cx, did, name);
+            let mac = build_macro(cx, did, name, import_def_id);
 
             let type_kind = match kind {
                 MacroKind::Bang => ItemType::Macro,
@@ -124,14 +124,19 @@ crate fn try_inline(
 
     let (attrs, cfg) = merge_attrs(cx, Some(parent_module), load_attrs(cx, did), attrs_clone);
     cx.inlined.insert(did.into());
-    ret.push(clean::Item::from_def_id_and_attrs_and_parts(
+    let mut item = clean::Item::from_def_id_and_attrs_and_parts(
         did,
         Some(name),
         kind,
-        box attrs,
+        Box::new(attrs),
         cx,
         cfg,
-    ));
+    );
+    if let Some(import_def_id) = import_def_id {
+        // The visibility needs to reflect the one from the reexport and not from the "source" DefId.
+        item.visibility = cx.tcx.visibility(import_def_id).clean(cx);
+    }
+    ret.push(item);
     Some(ret)
 }
 
@@ -459,7 +464,7 @@ crate fn build_impl(
             synthetic: false,
             blanket_impl: None,
         }),
-        box merged_attrs,
+        Box::new(merged_attrs),
         cx,
         cfg,
     ));
@@ -484,19 +489,20 @@ fn build_module(
             }
             if let Res::PrimTy(p) = item.res {
                 // Primitive types can't be inlined so generate an import instead.
+                let prim_ty = clean::PrimitiveType::from(p);
                 items.push(clean::Item {
                     name: None,
-                    attrs: box clean::Attributes::default(),
-                    def_id: FakeDefId::new_fake(did.krate),
+                    attrs: Box::new(clean::Attributes::default()),
+                    def_id: ItemId::Primitive(prim_ty, did.krate),
                     visibility: clean::Public,
-                    kind: box clean::ImportItem(clean::Import::new_simple(
+                    kind: Box::new(clean::ImportItem(clean::Import::new_simple(
                         item.ident.name,
                         clean::ImportSource {
                             path: clean::Path {
                                 global: false,
                                 res: item.res,
                                 segments: vec![clean::PathSegment {
-                                    name: clean::PrimitiveType::from(p).as_sym(),
+                                    name: prim_ty.as_sym(),
                                     args: clean::GenericArgs::AngleBracketed {
                                         args: Vec::new(),
                                         bindings: Vec::new(),
@@ -506,16 +512,18 @@ fn build_module(
                             did: None,
                         },
                         true,
-                    )),
+                    ))),
                     cfg: None,
                 });
-            } else if let Some(i) = try_inline(cx, did, item.res, item.ident.name, None, visited) {
+            } else if let Some(i) =
+                try_inline(cx, did, None, item.res, item.ident.name, None, visited)
+            {
                 items.extend(i)
             }
         }
     }
 
-    let span = clean::Span::from_rustc_span(cx.tcx.def_span(did));
+    let span = clean::Span::new(cx.tcx.def_span(did));
     clean::Module { items, span }
 }
 
@@ -543,27 +551,29 @@ fn build_static(cx: &mut DocContext<'_>, did: DefId, mutable: bool) -> clean::St
     }
 }
 
-fn build_macro(cx: &mut DocContext<'_>, did: DefId, name: Symbol) -> clean::ItemKind {
-    let imported_from = cx.tcx.crate_name(did.krate);
-    match cx.enter_resolver(|r| r.cstore().load_macro_untracked(did, cx.sess())) {
-        LoadedMacro::MacroDef(def, _) => {
-            let matchers: Vec<Span> = if let ast::ItemKind::MacroDef(ref def) = def.kind {
-                let tts: Vec<_> = def.body.inner_tokens().into_trees().collect();
-                tts.chunks(4).map(|arm| arm[0].span()).collect()
+fn build_macro(
+    cx: &mut DocContext<'_>,
+    def_id: DefId,
+    name: Symbol,
+    import_def_id: Option<DefId>,
+) -> clean::ItemKind {
+    let imported_from = cx.tcx.crate_name(def_id.krate);
+    match cx.enter_resolver(|r| r.cstore().load_macro_untracked(def_id, cx.sess())) {
+        LoadedMacro::MacroDef(item_def, _) => {
+            if let ast::ItemKind::MacroDef(ref def) = item_def.kind {
+                clean::MacroItem(clean::Macro {
+                    source: utils::display_macro_source(
+                        cx,
+                        name,
+                        def,
+                        def_id,
+                        cx.tcx.visibility(import_def_id.unwrap_or(def_id)),
+                    ),
+                    imported_from: Some(imported_from),
+                })
             } else {
                 unreachable!()
-            };
-
-            let source = format!(
-                "macro_rules! {} {{\n{}}}",
-                name.clean(cx),
-                matchers
-                    .iter()
-                    .map(|span| { format!("    {} => {{ ... }};\n", span.to_src(cx)) })
-                    .collect::<String>()
-            );
-
-            clean::MacroItem(clean::Macro { source, imported_from: Some(imported_from) })
+            }
         }
         LoadedMacro::ProcMacro(ext) => clean::ProcMacroItem(clean::ProcMacro {
             kind: ext.macro_kind(),

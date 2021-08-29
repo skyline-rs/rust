@@ -15,15 +15,15 @@ use rustc_span::source_map::Span;
 use rustc_span::sym;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for `let`-bindings, which are subsequently
+    /// ### What it does
+    /// Checks for `let`-bindings, which are subsequently
     /// returned.
     ///
-    /// **Why is this bad?** It is just extraneous code. Remove it to make your code
+    /// ### Why is this bad?
+    /// It is just extraneous code. Remove it to make your code
     /// more rusty.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// fn foo() -> String {
     ///     let x = String::new();
@@ -42,14 +42,14 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for return statements at the end of a block.
+    /// ### What it does
+    /// Checks for return statements at the end of a block.
     ///
-    /// **Why is this bad?** Removing the `return` and semicolon will make the code
+    /// ### Why is this bad?
+    /// Removing the `return` and semicolon will make the code
     /// more rusty.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// fn foo(x: usize) -> usize {
     ///     return x;
@@ -212,14 +212,6 @@ fn check_final_expr<'tcx>(
                     check_final_expr(cx, arm.body, Some(arm.body.span), RetReplacement::Block);
                 }
             },
-            MatchSource::IfLetDesugar {
-                contains_else_clause: true,
-            } => {
-                if let ExprKind::Block(ifblock, _) = arms[0].body.kind {
-                    check_block_return(cx, ifblock);
-                }
-                check_final_expr(cx, arms[1].body, None, RetReplacement::Empty);
-            },
             _ => (),
         },
         ExprKind::DropTemps(expr) => check_final_expr(cx, expr, None, RetReplacement::Empty),
@@ -296,7 +288,7 @@ impl<'tcx> Visitor<'tcx> for BorrowVisitor<'_, 'tcx> {
                 .fn_sig(def_id)
                 .output()
                 .skip_binder()
-                .walk()
+                .walk(self.cx.tcx)
                 .any(|arg| matches!(arg.unpack(), GenericArgKind::Lifetime(_)));
         }
 

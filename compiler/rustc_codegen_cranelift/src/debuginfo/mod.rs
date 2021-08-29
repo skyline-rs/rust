@@ -46,7 +46,7 @@ impl<'tcx> DebugContext<'tcx> {
     pub(crate) fn new(tcx: TyCtxt<'tcx>, isa: &dyn TargetIsa) -> Self {
         let encoding = Encoding {
             format: Format::Dwarf32,
-            // TODO: this should be configurable
+            // FIXME this should be configurable
             // macOS doesn't seem to support DWARF > 3
             // 5 version is required for md5 file hash
             version: if tcx.sess.target.is_like_osx {
@@ -61,10 +61,12 @@ impl<'tcx> DebugContext<'tcx> {
 
         let mut dwarf = DwarfUnit::new(encoding);
 
-        // FIXME: how to get version when building out of tree?
-        // Normally this would use option_env!("CFG_VERSION").
-        let producer = format!("cg_clif (rustc {})", "unknown version");
-        let comp_dir = tcx.sess.working_dir.to_string_lossy(false).into_owned();
+        let producer = format!(
+            "cg_clif (rustc {}, cranelift {})",
+            rustc_interface::util::version_str().unwrap_or("unknown version"),
+            cranelift_codegen::VERSION,
+        );
+        let comp_dir = tcx.sess.opts.working_dir.to_string_lossy(false).into_owned();
         let (name, file_info) = match tcx.sess.local_crate_source_file.clone() {
             Some(path) => {
                 let name = path.to_string_lossy().into_owned();

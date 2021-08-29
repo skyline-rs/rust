@@ -31,7 +31,6 @@ use crate::hash::Hasher;
 /// [ub]: ../../reference/behavior-considered-undefined.html
 #[stable(feature = "rust1", since = "1.0.0")]
 #[cfg_attr(not(test), rustc_diagnostic_item = "send_trait")]
-#[cfg_attr(not(bootstrap), lang = "send")]
 #[rustc_on_unimplemented(
     message = "`{Self}` cannot be sent between threads safely",
     label = "`{Self}` cannot be sent between threads safely"
@@ -529,7 +528,8 @@ macro_rules! impls {
         }
 
         #[stable(feature = "rust1", since = "1.0.0")]
-        impl<T: ?Sized> Default for $t<T> {
+        #[rustc_const_unstable(feature = "const_default_impls", issue = "87864")]
+        impl<T: ?Sized> const Default for $t<T> {
             fn default() -> Self {
                 Self
             }

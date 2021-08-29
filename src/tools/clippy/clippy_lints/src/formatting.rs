@@ -9,33 +9,33 @@ use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::source_map::Span;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for use of the non-existent `=*`, `=!` and `=-`
+    /// ### What it does
+    /// Checks for use of the non-existent `=*`, `=!` and `=-`
     /// operators.
     ///
-    /// **Why is this bad?** This is either a typo of `*=`, `!=` or `-=` or
+    /// ### Why is this bad?
+    /// This is either a typo of `*=`, `!=` or `-=` or
     /// confusing.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust,ignore
     /// a =- 42; // confusing, should it be `a -= 42` or `a = -42`?
     /// ```
     pub SUSPICIOUS_ASSIGNMENT_FORMATTING,
-    style,
+    suspicious,
     "suspicious formatting of `*=`, `-=` or `!=`"
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks the formatting of a unary operator on the right hand side
+    /// ### What it does
+    /// Checks the formatting of a unary operator on the right hand side
     /// of a binary operator. It lints if there is no space between the binary and unary operators,
     /// but there is a space between the unary and its operand.
     ///
-    /// **Why is this bad?** This is either a typo in the binary operator or confusing.
+    /// ### Why is this bad?
+    /// This is either a typo in the binary operator or confusing.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust,ignore
     /// if foo <- 30 { // this should be `foo < -30` but looks like a different operator
     /// }
@@ -44,20 +44,20 @@ declare_clippy_lint! {
     /// }
     /// ```
     pub SUSPICIOUS_UNARY_OP_FORMATTING,
-    style,
+    suspicious,
     "suspicious formatting of unary `-` or `!` on the RHS of a BinOp"
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for formatting of `else`. It lints if the `else`
+    /// ### What it does
+    /// Checks for formatting of `else`. It lints if the `else`
     /// is followed immediately by a newline or the `else` seems to be missing.
     ///
-    /// **Why is this bad?** This is probably some refactoring remnant, even if the
+    /// ### Why is this bad?
+    /// This is probably some refactoring remnant, even if the
     /// code is correct, it might look confusing.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust,ignore
     /// if foo {
     /// } { // looks like an `else` is missing here
@@ -80,19 +80,19 @@ declare_clippy_lint! {
     /// }
     /// ```
     pub SUSPICIOUS_ELSE_FORMATTING,
-    style,
+    suspicious,
     "suspicious formatting of `else`"
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for possible missing comma in an array. It lints if
+    /// ### What it does
+    /// Checks for possible missing comma in an array. It lints if
     /// an array element is a binary operator expression and it lies on two lines.
     ///
-    /// **Why is this bad?** This could lead to unexpected results.
+    /// ### Why is this bad?
+    /// This could lead to unexpected results.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust,ignore
     /// let a = &[
     ///     -1, -2, -3 // <= no comma here
@@ -164,7 +164,7 @@ fn check_unop(cx: &EarlyContext<'_>, expr: &Expr) {
         if !differing_macro_contexts(lhs.span, rhs.span) && !lhs.span.from_expansion();
         // span between BinOp LHS and RHS
         let binop_span = lhs.span.between(rhs.span);
-        // if RHS is a UnOp
+        // if RHS is an UnOp
         if let ExprKind::Unary(op, ref un_rhs) = rhs.kind;
         // from UnOp operator to UnOp operand
         let unop_operand_span = rhs.span.until(un_rhs.span);

@@ -175,9 +175,45 @@ pub(super) fn write_shared(
         cx.write_shared(SharedResource::InvocationSpecific { basename: p }, content, &options.emit)
     };
 
+    fn add_background_image_to_css(
+        cx: &Context<'_>,
+        css: &mut String,
+        rule: &str,
+        file: &'static str,
+    ) {
+        css.push_str(&format!(
+            "{} {{ background-image: url({}); }}",
+            rule,
+            SharedResource::ToolchainSpecific { basename: file }
+                .path(cx)
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+        ))
+    }
+
     // Add all the static files. These may already exist, but we just
     // overwrite them anyway to make sure that they're fresh and up-to-date.
-    write_minify("rustdoc.css", static_files::RUSTDOC_CSS)?;
+    let mut rustdoc_css = static_files::RUSTDOC_CSS.to_owned();
+    add_background_image_to_css(
+        cx,
+        &mut rustdoc_css,
+        "details.undocumented[open] > summary::before, \
+         details.rustdoc-toggle[open] > summary::before, \
+         details.rustdoc-toggle[open] > summary.hideme::before",
+        "toggle-minus.svg",
+    );
+    add_background_image_to_css(
+        cx,
+        &mut rustdoc_css,
+        "details.undocumented > summary::before, details.rustdoc-toggle > summary::before",
+        "toggle-plus.svg",
+    );
+    write_minify("rustdoc.css", &rustdoc_css)?;
+
+    // Add all the static files. These may already exist, but we just
+    // overwrite them anyway to make sure that they're fresh and up-to-date.
     write_minify("settings.css", static_files::SETTINGS_CSS)?;
     write_minify("noscript.css", static_files::NOSCRIPT_CSS)?;
 
@@ -217,6 +253,8 @@ pub(super) fn write_shared(
     write_toolchain("wheel.svg", static_files::WHEEL_SVG)?;
     write_toolchain("clipboard.svg", static_files::CLIPBOARD_SVG)?;
     write_toolchain("down-arrow.svg", static_files::DOWN_ARROW_SVG)?;
+    write_toolchain("toggle-minus.svg", static_files::TOGGLE_MINUS_PNG)?;
+    write_toolchain("toggle-plus.svg", static_files::TOGGLE_PLUS_PNG)?;
 
     let mut themes: Vec<&String> = themes.iter().collect();
     themes.sort();
@@ -234,7 +272,7 @@ pub(super) fn write_shared(
     write_minify("search.js", static_files::SEARCH_JS)?;
     write_minify("settings.js", static_files::SETTINGS_JS)?;
 
-    if cx.shared.include_sources {
+    if cx.include_sources {
         write_minify("source-script.js", static_files::sidebar::SOURCE_SCRIPT)?;
     }
 
@@ -360,7 +398,7 @@ pub(super) fn write_shared(
         }
     }
 
-    if cx.shared.include_sources {
+    if cx.include_sources {
         let mut hierarchy = Hierarchy::new(OsString::new());
         for source in cx
             .shared
@@ -480,7 +518,8 @@ pub(super) fn write_shared(
 
     // Update the list of all implementors for traits
     let dst = cx.dst.join("implementors");
-    for (&did, imps) in &cx.cache.implementors {
+    let cache = cx.cache();
+    for (&did, imps) in &cache.implementors {
         // Private modules can leak through to this phase of rustdoc, which
         // could contain implementations for otherwise private types. In some
         // rare cases we could find an implementation for an item which wasn't
@@ -488,9 +527,9 @@ pub(super) fn write_shared(
         //
         // FIXME: this is a vague explanation for why this can't be a `get`, in
         //        theory it should be...
-        let &(ref remote_path, remote_item_type) = match cx.cache.paths.get(&did) {
+        let &(ref remote_path, remote_item_type) = match cache.paths.get(&did) {
             Some(p) => p,
-            None => match cx.cache.external_paths.get(&did) {
+            None => match cache.external_paths.get(&did) {
                 Some(p) => p,
                 None => continue,
             },
@@ -519,7 +558,7 @@ pub(super) fn write_shared(
                     Some(Implementor {
                         text: imp.inner_impl().print(false, cx).to_string(),
                         synthetic: imp.inner_impl().synthetic,
-                        types: collect_paths_for_type(imp.inner_impl().for_.clone(), cx.cache()),
+                        types: collect_paths_for_type(imp.inner_impl().for_.clone(), cache),
                     })
                 }
             })
@@ -528,7 +567,7 @@ pub(super) fn write_shared(
         // Only create a js file if we have impls to add to it. If the trait is
         // documented locally though we always create the file to avoid dead
         // links.
-        if implementors.is_empty() && !cx.cache.paths.contains_key(&did) {
+        if implementors.is_empty() && !cache.paths.contains_key(&did) {
             continue;
         }
 

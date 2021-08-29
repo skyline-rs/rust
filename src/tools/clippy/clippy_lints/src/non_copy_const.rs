@@ -24,10 +24,12 @@ use rustc_typeck::hir_ty_to_ty;
 // FIXME: this is a correctness problem but there's no suitable
 // warn-by-default category.
 declare_clippy_lint! {
-    /// **What it does:** Checks for declaration of `const` items which is interior
+    /// ### What it does
+    /// Checks for declaration of `const` items which is interior
     /// mutable (e.g., contains a `Cell`, `Mutex`, `AtomicXxxx`, etc.).
     ///
-    /// **Why is this bad?** Consts are copied everywhere they are referenced, i.e.,
+    /// ### Why is this bad?
+    /// Consts are copied everywhere they are referenced, i.e.,
     /// every time you refer to the const a fresh instance of the `Cell` or `Mutex`
     /// or `AtomicXxxx` will be created, which defeats the whole purpose of using
     /// these types in the first place.
@@ -35,7 +37,8 @@ declare_clippy_lint! {
     /// The `const` should better be replaced by a `static` item if a global
     /// variable is wanted, or replaced by a `const fn` if a constructor is wanted.
     ///
-    /// **Known problems:** A "non-constant" const item is a legacy way to supply an
+    /// ### Known problems
+    /// A "non-constant" const item is a legacy way to supply an
     /// initialized value to downstream `static` items (e.g., the
     /// `std::sync::ONCE_INIT` constant). In this case the use of `const` is legit,
     /// and this lint should be suppressed.
@@ -52,7 +55,7 @@ declare_clippy_lint! {
     /// the interior mutable field is used or not. See issues
     /// [#5812](https://github.com/rust-lang/rust-clippy/issues/5812) and
     ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     ///
@@ -74,17 +77,20 @@ declare_clippy_lint! {
 // FIXME: this is a correctness problem but there's no suitable
 // warn-by-default category.
 declare_clippy_lint! {
-    /// **What it does:** Checks if `const` items which is interior mutable (e.g.,
+    /// ### What it does
+    /// Checks if `const` items which is interior mutable (e.g.,
     /// contains a `Cell`, `Mutex`, `AtomicXxxx`, etc.) has been borrowed directly.
     ///
-    /// **Why is this bad?** Consts are copied everywhere they are referenced, i.e.,
+    /// ### Why is this bad?
+    /// Consts are copied everywhere they are referenced, i.e.,
     /// every time you refer to the const a fresh instance of the `Cell` or `Mutex`
     /// or `AtomicXxxx` will be created, which defeats the whole purpose of using
     /// these types in the first place.
     ///
     /// The `const` value should be stored inside a `static` item.
     ///
-    /// **Known problems:** When an enum has variants with interior mutability, use of its non
+    /// ### Known problems
+    /// When an enum has variants with interior mutability, use of its non
     /// interior mutable variants can generate false positives. See issue
     /// [#3962](https://github.com/rust-lang/rust-clippy/issues/3962)
     ///
@@ -93,7 +99,7 @@ declare_clippy_lint! {
     /// [#5812](https://github.com/rust-lang/rust-clippy/issues/5812) and
     /// [#3825](https://github.com/rust-lang/rust-clippy/issues/3825)
     ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     /// const CONST_ATOM: AtomicUsize = AtomicUsize::new(12);
@@ -116,7 +122,7 @@ fn is_unfrozen<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
     // Ignore types whose layout is unknown since `is_freeze` reports every generic types as `!Freeze`,
     // making it indistinguishable from `UnsafeCell`. i.e. it isn't a tool to prove a type is
     // 'unfrozen'. However, this code causes a false negative in which
-    // a type contains a layout-unknown type, but also a unsafe cell like `const CELL: Cell<T>`.
+    // a type contains a layout-unknown type, but also an unsafe cell like `const CELL: Cell<T>`.
     // Yet, it's better than `ty.has_type_flags(TypeFlags::HAS_TY_PARAM | TypeFlags::HAS_PROJECTION)`
     // since it works when a pointer indirection involves (`Cell<*const T>`).
     // Making up a `ParamEnv` where every generic params and assoc types are `Freeze`is another option;
@@ -181,11 +187,7 @@ fn is_value_unfrozen_expr<'tcx>(cx: &LateContext<'tcx>, hir_id: HirId, def_id: D
 
     let result = cx.tcx.const_eval_resolve(
         cx.param_env,
-        ty::Unevaluated {
-            def: ty::WithOptConstParam::unknown(def_id),
-            substs,
-            promoted: None,
-        },
+        ty::Unevaluated::new(ty::WithOptConstParam::unknown(def_id), substs),
         None,
     );
     is_value_unfrozen_raw(cx, result, ty)
@@ -260,7 +262,7 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
                 // in other words, lint consts whose value *could* be unfrozen, not definitely is.
                 // This feels inconsistent with how the lint treats generic types,
                 // which avoids linting types which potentially become unfrozen.
-                // One could check whether a unfrozen type have a *frozen variant*
+                // One could check whether an unfrozen type have a *frozen variant*
                 // (like `body_id_opt.map_or_else(|| !has_frozen_variant(...), ...)`),
                 // and do the same as the case of generic types at impl items.
                 // Note that it isn't sufficient to check if it has an enum
@@ -287,7 +289,7 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
                 }) => {
                     if_chain! {
                         // Lint a trait impl item only when the definition is a generic type,
-                        // assuming a assoc const is not meant to be a interior mutable type.
+                        // assuming an assoc const is not meant to be an interior mutable type.
                         if let Some(of_trait_def_id) = of_trait_ref.trait_def_id();
                         if let Some(of_assoc_item) = specialization_graph::Node::Trait(of_trait_def_id)
                             .item(cx.tcx, impl_item.ident, AssocKind::Const, of_trait_def_id);

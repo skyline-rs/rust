@@ -14,6 +14,8 @@ Usage:
     cargo clippy [options] [--] [<opts>...]
 
 Common options:
+    --no-deps                Run Clippy only on the given crate, without linting the dependencies 
+    --fix                    Automatically apply lint suggestions. This flag implies `--no-deps`
     -h, --help               Print this message
     -V, --version            Print version info and exit
 
@@ -70,8 +72,8 @@ impl ClippyCmd {
         I: Iterator<Item = String>,
     {
         let mut cargo_subcommand = "check";
-        let mut unstable_options = false;
         let mut args = vec![];
+        let mut clippy_args: Vec<String> = vec![];
 
         for arg in old_args.by_ref() {
             match arg.as_str() {
@@ -79,20 +81,18 @@ impl ClippyCmd {
                     cargo_subcommand = "fix";
                     continue;
                 },
+                "--no-deps" => {
+                    clippy_args.push("--no-deps".into());
+                    continue;
+                },
                 "--" => break,
-                // Cover -Zunstable-options and -Z unstable-options
-                s if s.ends_with("unstable-options") => unstable_options = true,
                 _ => {},
             }
 
             args.push(arg);
         }
 
-        if cargo_subcommand == "fix" && !unstable_options {
-            panic!("Usage of `--fix` requires `-Z unstable-options`");
-        }
-
-        let mut clippy_args: Vec<String> = old_args.collect();
+        clippy_args.append(&mut (old_args.collect()));
         if cargo_subcommand == "fix" && !clippy_args.iter().any(|arg| arg == "--no-deps") {
             clippy_args.push("--no-deps".into());
         }
@@ -176,34 +176,23 @@ mod tests {
     use super::ClippyCmd;
 
     #[test]
-    #[should_panic]
-    fn fix_without_unstable() {
+    fn fix() {
         let args = "cargo clippy --fix".split_whitespace().map(ToString::to_string);
-        ClippyCmd::new(args);
-    }
-
-    #[test]
-    fn fix_unstable() {
-        let args = "cargo clippy --fix -Zunstable-options"
-            .split_whitespace()
-            .map(ToString::to_string);
         let cmd = ClippyCmd::new(args);
         assert_eq!("fix", cmd.cargo_subcommand);
-        assert!(cmd.args.iter().any(|arg| arg.ends_with("unstable-options")));
+        assert!(!cmd.args.iter().any(|arg| arg.ends_with("unstable-options")));
     }
 
     #[test]
     fn fix_implies_no_deps() {
-        let args = "cargo clippy --fix -Zunstable-options"
-            .split_whitespace()
-            .map(ToString::to_string);
+        let args = "cargo clippy --fix".split_whitespace().map(ToString::to_string);
         let cmd = ClippyCmd::new(args);
         assert!(cmd.clippy_args.iter().any(|arg| arg == "--no-deps"));
     }
 
     #[test]
     fn no_deps_not_duplicated_with_fix() {
-        let args = "cargo clippy --fix -Zunstable-options -- --no-deps"
+        let args = "cargo clippy --fix -- --no-deps"
             .split_whitespace()
             .map(ToString::to_string);
         let cmd = ClippyCmd::new(args);

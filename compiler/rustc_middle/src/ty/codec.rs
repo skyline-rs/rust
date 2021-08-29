@@ -209,7 +209,7 @@ where
 impl<'tcx, D: TyDecoder<'tcx>> Decodable<D> for Ty<'tcx> {
     #[allow(rustc::usage_of_ty_tykind)]
     fn decode(decoder: &mut D) -> Result<Ty<'tcx>, D::Error> {
-        // Handle shorthands first, if we have an usize > 0x80.
+        // Handle shorthands first, if we have a usize > 0x80.
         if decoder.positioned_at_shorthand() {
             let pos = decoder.read_usize()?;
             assert!(pos >= SHORTHAND_OFFSET);
@@ -228,7 +228,7 @@ impl<'tcx, D: TyDecoder<'tcx>> Decodable<D> for Ty<'tcx> {
 impl<'tcx, D: TyDecoder<'tcx>> Decodable<D> for ty::Binder<'tcx, ty::PredicateKind<'tcx>> {
     fn decode(decoder: &mut D) -> Result<ty::Binder<'tcx, ty::PredicateKind<'tcx>>, D::Error> {
         let bound_vars = Decodable::decode(decoder)?;
-        // Handle shorthands first, if we have an usize > 0x80.
+        // Handle shorthands first, if we have a usize > 0x80.
         Ok(ty::Binder::bind_with_vars(
             if decoder.positioned_at_shorthand() {
                 let pos = decoder.read_usize()?;
@@ -385,7 +385,7 @@ impl<'tcx, D: TyDecoder<'tcx>> RefDecodable<'tcx, D> for [mir::abstract_const::N
 impl<'tcx, D: TyDecoder<'tcx>> RefDecodable<'tcx, D> for ty::List<ty::BoundVariableKind> {
     fn decode(decoder: &mut D) -> Result<&'tcx Self, D::Error> {
         let len = decoder.read_usize()?;
-        Ok(decoder.tcx().mk_bound_variable_kinds((0..len).map(|_| Decodable::decode(decoder)))?)
+        decoder.tcx().mk_bound_variable_kinds((0..len).map(|_| Decodable::decode(decoder)))
     }
 }
 

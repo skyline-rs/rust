@@ -66,6 +66,13 @@ pub enum TokenKind {
     Ident,
     /// "r#ident"
     RawIdent,
+    /// An unknown prefix like `foo#`, `foo'`, `foo"`. Note that only the
+    /// prefix (`foo`) is included in the token, not the separator (which is
+    /// lexed as its own distinct token). In Rust 2021 and later, reserved
+    /// prefixes are reported as errors; in earlier editions, they result in a
+    /// (allowed by default) lint, and are treated as regular identifier
+    /// tokens.
+    UnknownPrefix,
     /// "12_u8", "1.0e-40", "b"123"". See `LiteralKind` for more details.
     Literal { kind: LiteralKind, suffix_start: usize },
     /// "'a"
@@ -266,24 +273,14 @@ pub fn is_whitespace(c: char) -> bool {
 /// a formal definition of valid identifier name.
 pub fn is_id_start(c: char) -> bool {
     // This is XID_Start OR '_' (which formally is not a XID_Start).
-    // We also add fast-path for ascii idents
-    ('a'..='z').contains(&c)
-        || ('A'..='Z').contains(&c)
-        || c == '_'
-        || (c > '\x7f' && unicode_xid::UnicodeXID::is_xid_start(c))
+    c == '_' || unicode_xid::UnicodeXID::is_xid_start(c)
 }
 
 /// True if `c` is valid as a non-first character of an identifier.
 /// See [Rust language reference](https://doc.rust-lang.org/reference/identifiers.html) for
 /// a formal definition of valid identifier name.
 pub fn is_id_continue(c: char) -> bool {
-    // This is exactly XID_Continue.
-    // We also add fast-path for ascii idents
-    ('a'..='z').contains(&c)
-        || ('A'..='Z').contains(&c)
-        || ('0'..='9').contains(&c)
-        || c == '_'
-        || (c > '\x7f' && unicode_xid::UnicodeXID::is_xid_continue(c))
+    unicode_xid::UnicodeXID::is_xid_continue(c)
 }
 
 /// The passed string is lexically an identifier.
@@ -323,7 +320,7 @@ impl Cursor<'_> {
                     let kind = RawStr { n_hashes, err };
                     Literal { kind, suffix_start }
                 }
-                _ => self.ident(),
+                _ => self.ident_or_unknown_prefix(),
             },
 
             // Byte literal, byte string literal, raw byte string literal or identifier.
@@ -358,12 +355,12 @@ impl Cursor<'_> {
                     let kind = RawByteStr { n_hashes, err };
                     Literal { kind, suffix_start }
                 }
-                _ => self.ident(),
+                _ => self.ident_or_unknown_prefix(),
             },
 
             // Identifier (this should be checked after other variant that can
             // start as identifier).
-            c if is_id_start(c) => self.ident(),
+            c if is_id_start(c) => self.ident_or_unknown_prefix(),
 
             // Numeric literal.
             c @ '0'..='9' => {
@@ -487,11 +484,16 @@ impl Cursor<'_> {
         RawIdent
     }
 
-    fn ident(&mut self) -> TokenKind {
+    fn ident_or_unknown_prefix(&mut self) -> TokenKind {
         debug_assert!(is_id_start(self.prev()));
         // Start is already eaten, eat the rest of identifier.
         self.eat_while(is_id_continue);
-        Ident
+        // Known prefixes must have been handled earlier. So if
+        // we see a prefix here, it is definitely an unknown prefix.
+        match self.first() {
+            '#' | '"' | '\'' => UnknownPrefix,
+            _ => Ident,
+        }
     }
 
     fn number(&mut self, first_digit: char) -> LiteralKind {

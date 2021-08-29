@@ -75,6 +75,7 @@ mod diverges;
 pub mod dropck;
 mod expectation;
 mod expr;
+mod fallback;
 mod fn_ctxt;
 mod gather_locals;
 mod generator_interior;
@@ -112,17 +113,15 @@ use rustc_hir::{HirIdMap, ImplicitSelfKind, Node};
 use rustc_index::bit_set::BitSet;
 use rustc_index::vec::Idx;
 use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
-use rustc_middle::ty::fold::{TypeFoldable, TypeFolder};
 use rustc_middle::ty::query::Providers;
-use rustc_middle::ty::subst::GenericArgKind;
 use rustc_middle::ty::subst::{InternalSubsts, Subst, SubstsRef};
-use rustc_middle::ty::{self, RegionKind, Ty, TyCtxt, UserType};
+use rustc_middle::ty::{self, Ty, TyCtxt, UserType};
 use rustc_session::config;
 use rustc_session::parse::feature_err;
 use rustc_session::Session;
+use rustc_span::source_map::DUMMY_SP;
 use rustc_span::symbol::{kw, Ident};
 use rustc_span::{self, BytePos, MultiSpan, Span};
-use rustc_span::{source_map::DUMMY_SP, sym};
 use rustc_target::abi::VariantIdx;
 use rustc_target::spec::abi::Abi;
 use rustc_trait_selection::traits;
@@ -259,9 +258,7 @@ fn adt_destructor(tcx: TyCtxt<'_>, def_id: DefId) -> Option<ty::Destructor> {
 }
 
 /// If this `DefId` is a "primary tables entry", returns
-/// `Some((body_id, header, decl))` with information about
-/// its body-id, fn-header and fn-decl (if any). Otherwise,
-/// returns `None`.
+/// `Some((body_id, body_ty, fn_sig))`. Otherwise, returns `None`.
 ///
 /// If this function returns `Some`, then `typeck_results(def_id)` will
 /// succeed; if it returns `None`, then `typeck_results(def_id)` may or
@@ -271,32 +268,28 @@ fn adt_destructor(tcx: TyCtxt<'_>, def_id: DefId) -> Option<ty::Destructor> {
 fn primary_body_of(
     tcx: TyCtxt<'_>,
     id: hir::HirId,
-) -> Option<(hir::BodyId, Option<&hir::Ty<'_>>, Option<&hir::FnHeader>, Option<&hir::FnDecl<'_>>)> {
+) -> Option<(hir::BodyId, Option<&hir::Ty<'_>>, Option<&hir::FnSig<'_>>)> {
     match tcx.hir().get(id) {
         Node::Item(item) => match item.kind {
             hir::ItemKind::Const(ref ty, body) | hir::ItemKind::Static(ref ty, _, body) => {
-                Some((body, Some(ty), None, None))
+                Some((body, Some(ty), None))
             }
-            hir::ItemKind::Fn(ref sig, .., body) => {
-                Some((body, None, Some(&sig.header), Some(&sig.decl)))
-            }
+            hir::ItemKind::Fn(ref sig, .., body) => Some((body, None, Some(&sig))),
             _ => None,
         },
         Node::TraitItem(item) => match item.kind {
-            hir::TraitItemKind::Const(ref ty, Some(body)) => Some((body, Some(ty), None, None)),
+            hir::TraitItemKind::Const(ref ty, Some(body)) => Some((body, Some(ty), None)),
             hir::TraitItemKind::Fn(ref sig, hir::TraitFn::Provided(body)) => {
-                Some((body, None, Some(&sig.header), Some(&sig.decl)))
+                Some((body, None, Some(&sig)))
             }
             _ => None,
         },
         Node::ImplItem(item) => match item.kind {
-            hir::ImplItemKind::Const(ref ty, body) => Some((body, Some(ty), None, None)),
-            hir::ImplItemKind::Fn(ref sig, body) => {
-                Some((body, None, Some(&sig.header), Some(&sig.decl)))
-            }
+            hir::ImplItemKind::Const(ref ty, body) => Some((body, Some(ty), None)),
+            hir::ImplItemKind::Fn(ref sig, body) => Some((body, None, Some(&sig))),
             _ => None,
         },
-        Node::AnonConst(constant) => Some((constant.body, None, None, None)),
+        Node::AnonConst(constant) => Some((constant.body, None, None)),
         _ => None,
     }
 }
@@ -319,117 +312,6 @@ fn has_typeck_results(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
 
 fn used_trait_imports(tcx: TyCtxt<'_>, def_id: LocalDefId) -> &FxHashSet<LocalDefId> {
     &*tcx.typeck(def_id).used_trait_imports
-}
-
-/// Inspects the substs of opaque types, replacing any inference variables
-/// with proper generic parameter from the identity substs.
-///
-/// This is run after we normalize the function signature, to fix any inference
-/// variables introduced by the projection of associated types. This ensures that
-/// any opaque types used in the signature continue to refer to generic parameters,
-/// allowing them to be considered for defining uses in the function body
-///
-/// For example, consider this code.
-///
-/// ```rust
-/// trait MyTrait {
-///     type MyItem;
-///     fn use_it(self) -> Self::MyItem
-/// }
-/// impl<T, I> MyTrait for T where T: Iterator<Item = I> {
-///     type MyItem = impl Iterator<Item = I>;
-///     fn use_it(self) -> Self::MyItem {
-///         self
-///     }
-/// }
-/// ```
-///
-/// When we normalize the signature of `use_it` from the impl block,
-/// we will normalize `Self::MyItem` to the opaque type `impl Iterator<Item = I>`
-/// However, this projection result may contain inference variables, due
-/// to the way that projection works. We didn't have any inference variables
-/// in the signature to begin with - leaving them in will cause us to incorrectly
-/// conclude that we don't have a defining use of `MyItem`. By mapping inference
-/// variables back to the actual generic parameters, we will correctly see that
-/// we have a defining use of `MyItem`
-fn fixup_opaque_types<'tcx, T>(tcx: TyCtxt<'tcx>, val: T) -> T
-where
-    T: TypeFoldable<'tcx>,
-{
-    struct FixupFolder<'tcx> {
-        tcx: TyCtxt<'tcx>,
-    }
-
-    impl<'tcx> TypeFolder<'tcx> for FixupFolder<'tcx> {
-        fn tcx<'a>(&'a self) -> TyCtxt<'tcx> {
-            self.tcx
-        }
-
-        fn fold_ty(&mut self, ty: Ty<'tcx>) -> Ty<'tcx> {
-            match *ty.kind() {
-                ty::Opaque(def_id, substs) => {
-                    debug!("fixup_opaque_types: found type {:?}", ty);
-                    // Here, we replace any inference variables that occur within
-                    // the substs of an opaque type. By definition, any type occurring
-                    // in the substs has a corresponding generic parameter, which is what
-                    // we replace it with.
-                    // This replacement is only run on the function signature, so any
-                    // inference variables that we come across must be the rust of projection
-                    // (there's no other way for a user to get inference variables into
-                    // a function signature).
-                    if ty.needs_infer() {
-                        let new_substs = InternalSubsts::for_item(self.tcx, def_id, |param, _| {
-                            let old_param = substs[param.index as usize];
-                            match old_param.unpack() {
-                                GenericArgKind::Type(old_ty) => {
-                                    if let ty::Infer(_) = old_ty.kind() {
-                                        // Replace inference type with a generic parameter
-                                        self.tcx.mk_param_from_def(param)
-                                    } else {
-                                        old_param.fold_with(self)
-                                    }
-                                }
-                                GenericArgKind::Const(old_const) => {
-                                    if let ty::ConstKind::Infer(_) = old_const.val {
-                                        // This should never happen - we currently do not support
-                                        // 'const projections', e.g.:
-                                        // `impl<T: SomeTrait> MyTrait for T where <T as SomeTrait>::MyConst == 25`
-                                        // which should be the only way for us to end up with a const inference
-                                        // variable after projection. If Rust ever gains support for this kind
-                                        // of projection, this should *probably* be changed to
-                                        // `self.tcx.mk_param_from_def(param)`
-                                        bug!(
-                                            "Found infer const: `{:?}` in opaque type: {:?}",
-                                            old_const,
-                                            ty
-                                        );
-                                    } else {
-                                        old_param.fold_with(self)
-                                    }
-                                }
-                                GenericArgKind::Lifetime(old_region) => {
-                                    if let RegionKind::ReVar(_) = old_region {
-                                        self.tcx.mk_param_from_def(param)
-                                    } else {
-                                        old_param.fold_with(self)
-                                    }
-                                }
-                            }
-                        });
-                        let new_ty = self.tcx.mk_opaque(def_id, new_substs);
-                        debug!("fixup_opaque_types: new type: {:?}", new_ty);
-                        new_ty
-                    } else {
-                        ty
-                    }
-                }
-                _ => ty.super_fold_with(self),
-            }
-        }
-    }
-
-    debug!("fixup_opaque_types({:?})", val);
-    val.fold_with(&mut FixupFolder { tcx })
 }
 
 fn typeck_const_arg<'tcx>(
@@ -475,14 +357,14 @@ fn typeck_with_fallback<'tcx>(
     let span = tcx.hir().span(id);
 
     // Figure out what primary body this item has.
-    let (body_id, body_ty, fn_header, fn_decl) = primary_body_of(tcx, id).unwrap_or_else(|| {
+    let (body_id, body_ty, fn_sig) = primary_body_of(tcx, id).unwrap_or_else(|| {
         span_bug!(span, "can't type-check body of {:?}", def_id);
     });
     let body = tcx.hir().body(body_id);
 
     let typeck_results = Inherited::build(tcx, def_id).enter(|inh| {
         let param_env = tcx.param_env(def_id);
-        let fcx = if let (Some(header), Some(decl)) = (fn_header, fn_decl) {
+        let (fcx, wf_tys) = if let Some(hir::FnSig { header, decl, .. }) = fn_sig {
             let fn_sig = if crate::collect::get_infer_ret_ty(&decl.output).is_some() {
                 let fcx = FnCtxt::new(&inh, param_env, body.value.hir_id);
                 <dyn AstConv<'_>>::ty_of_fn(
@@ -499,21 +381,27 @@ fn typeck_with_fallback<'tcx>(
                 tcx.fn_sig(def_id)
             };
 
-            check_abi(tcx, span, fn_sig.abi());
+            check_abi(tcx, id, span, fn_sig.abi());
 
+            // When normalizing the function signature, we assume all types are
+            // well-formed. So, we don't need to worry about the obligations
+            // from normalization. We could just discard these, but to align with
+            // compare_method and elsewhere, we just add implied bounds for
+            // these types.
+            let mut wf_tys = vec![];
             // Compute the fty from point of view of inside the fn.
             let fn_sig = tcx.liberate_late_bound_regions(def_id.to_def_id(), fn_sig);
+            wf_tys.extend(fn_sig.inputs_and_output.iter());
             let fn_sig = inh.normalize_associated_types_in(
                 body.value.span,
                 body_id.hir_id,
                 param_env,
                 fn_sig,
             );
+            wf_tys.extend(fn_sig.inputs_and_output.iter());
 
-            let fn_sig = fixup_opaque_types(tcx, fn_sig);
-
-            let fcx = check_fn(&inh, param_env, fn_sig, decl, id, body, None).0;
-            fcx
+            let fcx = check_fn(&inh, param_env, fn_sig, decl, id, body, None, true).0;
+            (fcx, wf_tys)
         } else {
             let fcx = FnCtxt::new(&inh, param_env, body.value.hir_id);
             let expected_type = body_ty
@@ -556,71 +444,22 @@ fn typeck_with_fallback<'tcx>(
             let expected_type = fcx.normalize_associated_types_in(body.value.span, expected_type);
             fcx.require_type_is_sized(expected_type, body.value.span, traits::ConstSized);
 
-            let revealed_ty = fcx.instantiate_opaque_types_from_value(
-                id,
-                expected_type,
-                body.value.span,
-                Some(sym::impl_trait_in_bindings),
-            );
-
             // Gather locals in statics (because of block expressions).
-            GatherLocalsVisitor::new(&fcx, id).visit_body(body);
+            GatherLocalsVisitor::new(&fcx).visit_body(body);
 
-            fcx.check_expr_coercable_to_type(&body.value, revealed_ty, None);
+            fcx.check_expr_coercable_to_type(&body.value, expected_type, None);
 
-            fcx.write_ty(id, revealed_ty);
+            fcx.write_ty(id, expected_type);
 
-            fcx
+            (fcx, vec![])
         };
 
-        // All type checking constraints were added, try to fallback unsolved variables.
-        fcx.select_obligations_where_possible(false, |_| {});
-        let mut fallback_has_occurred = false;
-
-        // We do fallback in two passes, to try to generate
-        // better error messages.
-        // The first time, we do *not* replace opaque types.
-        for ty in &fcx.unsolved_variables() {
-            fallback_has_occurred |= fcx.fallback_if_possible(ty, FallbackMode::NoOpaque);
-        }
-        // We now see if we can make progress. This might
-        // cause us to unify inference variables for opaque types,
-        // since we may have unified some other type variables
-        // during the first phase of fallback.
-        // This means that we only replace inference variables with their underlying
-        // opaque types as a last resort.
-        //
-        // In code like this:
-        //
-        // ```rust
-        // type MyType = impl Copy;
-        // fn produce() -> MyType { true }
-        // fn bad_produce() -> MyType { panic!() }
-        // ```
-        //
-        // we want to unify the opaque inference variable in `bad_produce`
-        // with the diverging fallback for `panic!` (e.g. `()` or `!`).
-        // This will produce a nice error message about conflicting concrete
-        // types for `MyType`.
-        //
-        // If we had tried to fallback the opaque inference variable to `MyType`,
-        // we will generate a confusing type-check error that does not explicitly
-        // refer to opaque types.
-        fcx.select_obligations_where_possible(fallback_has_occurred, |_| {});
-
-        // We now run fallback again, but this time we allow it to replace
-        // unconstrained opaque type variables, in addition to performing
-        // other kinds of fallback.
-        for ty in &fcx.unsolved_variables() {
-            fallback_has_occurred |= fcx.fallback_if_possible(ty, FallbackMode::All);
-        }
-
-        // See if we can make any more progress.
-        fcx.select_obligations_where_possible(fallback_has_occurred, |_| {});
+        let fallback_has_occurred = fcx.type_inference_fallback();
 
         // Even though coercion casts provide type hints, we check casts after fallback for
         // backwards compatibility. This makes fallback a stronger type hint than a cast coercion.
         fcx.check_casts();
+        fcx.select_obligations_where_possible(fallback_has_occurred, |_| {});
 
         // Closure and generator analysis may run after fallback
         // because they don't constrain other type variables.
@@ -635,8 +474,8 @@ fn typeck_with_fallback<'tcx>(
 
         fcx.select_all_obligations_or_error();
 
-        if fn_decl.is_some() {
-            fcx.regionck_fn(id, body);
+        if fn_sig.is_some() {
+            fcx.regionck_fn(id, body, span, &wf_tys);
         } else {
             fcx.regionck_expr(body);
         }
@@ -686,66 +525,6 @@ fn get_owner_return_paths(
             visitor.visit_body(body);
             (hir_id, visitor)
         })
-}
-
-/// Emit an error for recursive opaque types in a `let` binding.
-fn binding_opaque_type_cycle_error(
-    tcx: TyCtxt<'tcx>,
-    def_id: LocalDefId,
-    span: Span,
-    partially_expanded_type: Ty<'tcx>,
-) {
-    let mut err = struct_span_err!(tcx.sess, span, E0720, "cannot resolve opaque type");
-    err.span_label(span, "cannot resolve opaque type");
-    // Find the owner that declared this `impl Trait` type.
-    let hir_id = tcx.hir().local_def_id_to_hir_id(def_id);
-    let mut prev_hir_id = hir_id;
-    let mut hir_id = tcx.hir().get_parent_node(hir_id);
-    while let Some(node) = tcx.hir().find(hir_id) {
-        match node {
-            hir::Node::Local(hir::Local {
-                pat,
-                init: None,
-                ty: Some(ty),
-                source: hir::LocalSource::Normal,
-                ..
-            }) => {
-                err.span_label(pat.span, "this binding might not have a concrete type");
-                err.span_suggestion_verbose(
-                    ty.span.shrink_to_hi(),
-                    "set the binding to a value for a concrete type to be resolved",
-                    " = /* value */".to_string(),
-                    Applicability::HasPlaceholders,
-                );
-            }
-            hir::Node::Local(hir::Local {
-                init: Some(expr),
-                source: hir::LocalSource::Normal,
-                ..
-            }) => {
-                let hir_id = tcx.hir().local_def_id_to_hir_id(def_id);
-                let typeck_results =
-                    tcx.typeck(tcx.hir().local_def_id(tcx.hir().get_parent_item(hir_id)));
-                if let Some(ty) = typeck_results.node_type_opt(expr.hir_id) {
-                    err.span_label(
-                        expr.span,
-                        &format!(
-                            "this is of type `{}`, which doesn't constrain \
-                             `{}` enough to arrive to a concrete type",
-                            ty, partially_expanded_type
-                        ),
-                    );
-                }
-            }
-            _ => {}
-        }
-        if prev_hir_id == hir_id {
-            break;
-        }
-        prev_hir_id = hir_id;
-        hir_id = tcx.hir().get_parent_node(hir_id);
-    }
-    err.emit();
 }
 
 // Forbid defining intrinsics in Rust code,
@@ -877,7 +656,7 @@ fn bounds_from_generic_predicates<'tcx>(
         debug!("predicate {:?}", predicate);
         let bound_predicate = predicate.kind();
         match bound_predicate.skip_binder() {
-            ty::PredicateKind::Trait(trait_predicate, _) => {
+            ty::PredicateKind::Trait(trait_predicate) => {
                 let entry = types.entry(trait_predicate.self_ty()).or_default();
                 let def_id = trait_predicate.def_id();
                 if Some(def_id) != tcx.lang_items().sized_trait() {
@@ -973,7 +752,7 @@ fn fn_sig_suggestion<'tcx>(
             })
         })
         .chain(std::iter::once(if sig.c_variadic { Some("...".to_string()) } else { None }))
-        .filter_map(|arg| arg)
+        .flatten()
         .collect::<Vec<String>>()
         .join(", ");
     let output = sig.output();
@@ -1100,16 +879,6 @@ fn report_unexpected_variant_res(tcx: TyCtxt<'_>, res: Res, span: Span) {
 enum TupleArgumentsFlag {
     DontTupleArguments,
     TupleArguments,
-}
-
-/// Controls how we perform fallback for unconstrained
-/// type variables.
-enum FallbackMode {
-    /// Do not fallback type variables to opaque types.
-    NoOpaque,
-    /// Perform all possible kinds of fallback, including
-    /// turning type variables to opaque types.
-    All,
 }
 
 /// A wrapper for `InferCtxt`'s `in_progress_typeck_results` field.

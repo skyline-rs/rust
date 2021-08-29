@@ -200,6 +200,7 @@ use rustc_middle::ty::{self, GenericParamDefKind, Instance, Ty, TyCtxt, TypeFold
 use rustc_middle::{middle::codegen_fn_attrs::CodegenFnAttrFlags, mir::visit::TyContext};
 use rustc_session::config::EntryFnType;
 use rustc_session::lint::builtin::LARGE_ASSIGNMENTS;
+use rustc_session::Limit;
 use rustc_span::source_map::{dummy_spanned, respan, Span, Spanned, DUMMY_SP};
 use rustc_target::abi::Size;
 use smallvec::SmallVec;
@@ -294,6 +295,7 @@ pub fn collect_crate_mono_items(
 
     let mut visited = MTLock::new(FxHashSet::default());
     let mut inlining_map = MTLock::new(InliningMap::new());
+    let recursion_limit = tcx.recursion_limit();
 
     {
         let visited: MTRef<'_, _> = &mut visited;
@@ -307,6 +309,7 @@ pub fn collect_crate_mono_items(
                     dummy_spanned(root),
                     visited,
                     &mut recursion_depths,
+                    recursion_limit,
                     inlining_map,
                 );
             });
@@ -350,6 +353,7 @@ fn collect_items_rec<'tcx>(
     starting_point: Spanned<MonoItem<'tcx>>,
     visited: MTRef<'_, MTLock<FxHashSet<MonoItem<'tcx>>>>,
     recursion_depths: &mut DefIdMap<usize>,
+    recursion_limit: Limit,
     inlining_map: MTRef<'_, MTLock<InliningMap<'tcx>>>,
 ) {
     if !visited.lock_mut().insert(starting_point.node) {
@@ -399,7 +403,7 @@ fn collect_items_rec<'tcx>(
             recursion_depth_reset = None;
 
             if let Ok(alloc) = tcx.eval_static_initializer(def_id) {
-                for &((), id) in alloc.relocations().values() {
+                for &id in alloc.relocations().values() {
                     collect_miri(tcx, id, &mut neighbors);
                 }
             }
@@ -409,8 +413,13 @@ fn collect_items_rec<'tcx>(
             debug_assert!(should_codegen_locally(tcx, &instance));
 
             // Keep track of the monomorphization recursion depth
-            recursion_depth_reset =
-                Some(check_recursion_limit(tcx, instance, starting_point.span, recursion_depths));
+            recursion_depth_reset = Some(check_recursion_limit(
+                tcx,
+                instance,
+                starting_point.span,
+                recursion_depths,
+                recursion_limit,
+            ));
             check_type_length_limit(tcx, instance);
 
             rustc_data_structures::stack::ensure_sufficient_stack(|| {
@@ -455,7 +464,7 @@ fn collect_items_rec<'tcx>(
     record_accesses(tcx, starting_point.node, neighbors.iter().map(|i| &i.node), inlining_map);
 
     for neighbour in neighbors {
-        collect_items_rec(tcx, neighbour, visited, recursion_depths, inlining_map);
+        collect_items_rec(tcx, neighbour, visited, recursion_depths, recursion_limit, inlining_map);
     }
 
     if let Some((def_id, depth)) = recursion_depth_reset {
@@ -523,6 +532,7 @@ fn check_recursion_limit<'tcx>(
     instance: Instance<'tcx>,
     span: Span,
     recursion_depths: &mut DefIdMap<usize>,
+    recursion_limit: Limit,
 ) -> (DefId, usize) {
     let def_id = instance.def_id();
     let recursion_depth = recursion_depths.get(&def_id).cloned().unwrap_or(0);
@@ -539,7 +549,7 @@ fn check_recursion_limit<'tcx>(
     // Code that needs to instantiate the same function recursively
     // more than the recursion limit is assumed to be causing an
     // infinite expansion.
-    if !tcx.sess.recursion_limit().value_within_limit(adjusted_recursion_depth) {
+    if !recursion_limit.value_within_limit(adjusted_recursion_depth) {
         let (shrunk, written_to_path) = shrunk_instance_name(tcx, &instance, 32, 32);
         let error = format!("reached the recursion limit while instantiating `{}`", shrunk);
         let mut err = tcx.sess.struct_span_fatal(span, &error);
@@ -563,7 +573,7 @@ fn check_type_length_limit<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) {
     let type_length = instance
         .substs
         .iter()
-        .flat_map(|arg| arg.walk())
+        .flat_map(|arg| arg.walk(tcx))
         .filter(|arg| match arg.unpack() {
             GenericArgKind::Type(_) | GenericArgKind::Const(_) => true,
             GenericArgKind::Lifetime(_) => false,
@@ -577,7 +587,7 @@ fn check_type_length_limit<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) {
     // which means that rustc basically hangs.
     //
     // Bail out in these cases to avoid that bad user experience.
-    if !tcx.sess.type_length_limit().value_within_limit(type_length) {
+    if !tcx.type_length_limit().value_within_limit(type_length) {
         let (shrunk, written_to_path) = shrunk_instance_name(tcx, &instance, 32, 32);
         let msg = format!("reached the type-length limit while instantiating `{}`", shrunk);
         let mut diag = tcx.sess.struct_span_fatal(tcx.def_span(instance.def_id()), &msg);
@@ -814,7 +824,7 @@ impl<'a, 'tcx> MirVisitor<'tcx> for MirNeighborCollector<'a, 'tcx> {
 
     fn visit_operand(&mut self, operand: &mir::Operand<'tcx>, location: Location) {
         self.super_operand(operand, location);
-        let limit = self.tcx.sess.move_size_limit();
+        let limit = self.tcx.move_size_limit().0;
         if limit == 0 {
             return;
         }
@@ -1071,6 +1081,13 @@ fn create_fn_mono_item<'tcx>(
     source: Span,
 ) -> Spanned<MonoItem<'tcx>> {
     debug!("create_fn_mono_item(instance={})", instance);
+
+    let def_id = instance.def_id();
+    if tcx.sess.opts.debugging_opts.profile_closures && def_id.is_local() && tcx.is_closure(def_id)
+    {
+        monomorphize::util::dump_closure_profile(tcx, instance);
+    }
+
     respan(source, MonoItem::Fn(instance.polymorphize(tcx)))
 }
 
@@ -1099,13 +1116,13 @@ fn create_mono_items_for_vtable_methods<'tcx>(
                     | VtblEntry::MetadataSize
                     | VtblEntry::MetadataAlign
                     | VtblEntry::Vacant => None,
-                    VtblEntry::Method(def_id, substs) => ty::Instance::resolve_for_vtable(
-                        tcx,
-                        ty::ParamEnv::reveal_all(),
-                        *def_id,
-                        substs,
-                    )
-                    .filter(|instance| should_codegen_locally(tcx, instance)),
+                    VtblEntry::TraitVPtr(_) => {
+                        // all super trait items already covered, so skip them.
+                        None
+                    }
+                    VtblEntry::Method(instance) => {
+                        Some(*instance).filter(|instance| should_codegen_locally(tcx, instance))
+                    }
                 })
                 .map(|item| create_fn_mono_item(tcx, item, source));
             output.extend(methods);
@@ -1132,6 +1149,7 @@ impl ItemLikeVisitor<'v> for RootCollector<'_, 'v> {
         match item.kind {
             hir::ItemKind::ExternCrate(..)
             | hir::ItemKind::Use(..)
+            | hir::ItemKind::Macro(..)
             | hir::ItemKind::ForeignMod { .. }
             | hir::ItemKind::TyAlias(..)
             | hir::ItemKind::Trait(..)
@@ -1352,7 +1370,7 @@ fn collect_miri<'tcx>(
         }
         GlobalAlloc::Memory(alloc) => {
             trace!("collecting {:?} with {:#?}", alloc_id, alloc);
-            for &((), inner) in alloc.relocations().values() {
+            for &inner in alloc.relocations().values() {
                 rustc_data_structures::stack::ensure_sufficient_stack(|| {
                     collect_miri(tcx, inner, output);
                 });
@@ -1385,9 +1403,9 @@ fn collect_const_value<'tcx>(
     output: &mut Vec<Spanned<MonoItem<'tcx>>>,
 ) {
     match value {
-        ConstValue::Scalar(Scalar::Ptr(ptr)) => collect_miri(tcx, ptr.alloc_id, output),
+        ConstValue::Scalar(Scalar::Ptr(ptr, _size)) => collect_miri(tcx, ptr.provenance, output),
         ConstValue::Slice { data: alloc, start: _, end: _ } | ConstValue::ByRef { alloc, .. } => {
-            for &((), id) in alloc.relocations().values() {
+            for &id in alloc.relocations().values() {
                 collect_miri(tcx, id, output);
             }
         }

@@ -1,5 +1,3 @@
-// ignore-tidy-filelength
-
 #[cfg(test)]
 mod tests;
 
@@ -10,6 +8,7 @@ use hashbrown::hash_map as base;
 use crate::borrow::Borrow;
 use crate::cell::Cell;
 use crate::collections::TryReserveError;
+use crate::collections::TryReserveErrorKind;
 use crate::fmt::{self, Debug};
 #[allow(deprecated)]
 use crate::hash::{BuildHasher, Hash, Hasher, SipHasher13};
@@ -124,8 +123,21 @@ use crate::sys;
 /// }
 /// ```
 ///
-/// `HashMap` also implements an [`Entry API`](#method.entry), which allows
-/// for more complex methods of getting, setting, updating and removing keys and
+/// A `HashMap` with a known list of items can be initialized from an array:
+///
+/// ```
+/// use std::collections::HashMap;
+///
+/// let solar_distance = HashMap::from([
+///     ("Mercury", 0.4),
+///     ("Venus", 0.7),
+///     ("Earth", 1.0),
+///     ("Mars", 1.5),
+/// ]);
+/// ```
+///
+/// `HashMap` implements an [`Entry API`](#method.entry), which allows
+/// for complex methods of getting, setting, updating and removing keys and
 /// their values:
 ///
 /// ```
@@ -179,26 +191,16 @@ use crate::sys;
 /// }
 ///
 /// // Use a HashMap to store the vikings' health points.
-/// let mut vikings = HashMap::new();
-///
-/// vikings.insert(Viking::new("Einar", "Norway"), 25);
-/// vikings.insert(Viking::new("Olaf", "Denmark"), 24);
-/// vikings.insert(Viking::new("Harald", "Iceland"), 12);
+/// let vikings = HashMap::from([
+///     (Viking::new("Einar", "Norway"), 25),
+///     (Viking::new("Olaf", "Denmark"), 24),
+///     (Viking::new("Harald", "Iceland"), 12),
+/// ]);
 ///
 /// // Use derived implementation to print the status of the vikings.
 /// for (viking, health) in &vikings {
 ///     println!("{:?} has {} hp", viking, health);
 /// }
-/// ```
-///
-/// A `HashMap` with fixed list of elements can be initialized from an array:
-///
-/// ```
-/// use std::collections::HashMap;
-///
-/// let timber_resources: HashMap<&str, i32> = [("Norway", 100), ("Denmark", 50), ("Iceland", 10)]
-///     .iter().cloned().collect();
-/// // use the values stored in map
 /// ```
 
 #[cfg_attr(not(test), rustc_diagnostic_item = "hashmap_type")]
@@ -454,7 +456,6 @@ impl<K, V, S> HashMap<K, V, S> {
     /// a.insert(1, "a");
     /// assert_eq!(a.len(), 1);
     /// ```
-    #[doc(alias = "length")]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn len(&self) -> usize {
         self.base.len()
@@ -666,7 +667,6 @@ where
     /// # Examples
     ///
     /// ```
-    /// #![feature(shrink_to)]
     /// use std::collections::HashMap;
     ///
     /// let mut map: HashMap<i32, i32> = HashMap::with_capacity(100);
@@ -679,7 +679,7 @@ where
     /// assert!(map.capacity() >= 2);
     /// ```
     #[inline]
-    #[unstable(feature = "shrink_to", reason = "new API", issue = "56431")]
+    #[stable(feature = "shrink_to", since = "1.56.0")]
     pub fn shrink_to(&mut self, min_capacity: usize) {
         self.base.shrink_to(min_capacity);
     }
@@ -893,7 +893,6 @@ where
     /// assert_eq!(map.remove(&1), Some("a"));
     /// assert_eq!(map.remove(&1), None);
     /// ```
-    #[doc(alias = "delete")]
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn remove<Q: ?Sized>(&mut self, k: &Q) -> Option<V>
@@ -936,6 +935,7 @@ where
     /// Retains only the elements specified by the predicate.
     ///
     /// In other words, remove all pairs `(k, v)` such that `f(&k, &mut v)` returns `false`.
+    /// The elements are visited in unsorted (and unspecified) order.
     ///
     /// # Examples
     ///
@@ -969,7 +969,11 @@ where
     /// map.insert("b", 2);
     /// map.insert("c", 3);
     ///
-    /// let vec: Vec<&str> = map.into_keys().collect();
+    /// let mut vec: Vec<&str> = map.into_keys().collect();
+    /// // The `IntoKeys` iterator produces keys in arbitrary order, so the
+    /// // keys must be sorted to test them against a sorted array.
+    /// vec.sort_unstable();
+    /// assert_eq!(vec, ["a", "b", "c"]);
     /// ```
     #[inline]
     #[stable(feature = "map_into_keys_values", since = "1.54.0")]
@@ -991,7 +995,11 @@ where
     /// map.insert("b", 2);
     /// map.insert("c", 3);
     ///
-    /// let vec: Vec<i32> = map.into_values().collect();
+    /// let mut vec: Vec<i32> = map.into_values().collect();
+    /// // The `IntoValues` iterator produces values in arbitrary order, so
+    /// // the values must be sorted to test them against a sorted array.
+    /// vec.sort_unstable();
+    /// assert_eq!(vec, [1, 2, 3]);
     /// ```
     #[inline]
     #[stable(feature = "map_into_keys_values", since = "1.54.0")]
@@ -1149,6 +1157,37 @@ where
     }
 }
 
+#[stable(feature = "std_collections_from_array", since = "1.56.0")]
+// Note: as what is currently the most convenient built-in way to construct
+// a HashMap, a simple usage of this function must not *require* the user
+// to provide a type annotation in order to infer the third type parameter
+// (the hasher parameter, conventionally "S").
+// To that end, this impl is defined using RandomState as the concrete
+// type of S, rather than being generic over `S: BuildHasher + Default`.
+// It is expected that users who want to specify a hasher will manually use
+// `with_capacity_and_hasher`.
+// If type parameter defaults worked on impls, and if type parameter
+// defaults could be mixed with const generics, then perhaps
+// this could be generalized.
+// See also the equivalent impl on HashSet.
+impl<K, V, const N: usize> From<[(K, V); N]> for HashMap<K, V, RandomState>
+where
+    K: Eq + Hash,
+{
+    /// # Examples
+    ///
+    /// ```
+    /// use std::collections::HashMap;
+    ///
+    /// let map1 = HashMap::from([(1, 2), (3, 4)]);
+    /// let map2: HashMap<_, _> = [(1, 2), (3, 4)].into();
+    /// assert_eq!(map1, map2);
+    /// ```
+    fn from(arr: [(K, V); N]) -> Self {
+        crate::array::IntoIter::new(arr).collect()
+    }
+}
+
 /// An iterator over the entries of a `HashMap`.
 ///
 /// This `struct` is created by the [`iter`] method on [`HashMap`]. See its
@@ -1208,7 +1247,7 @@ pub struct IterMut<'a, K: 'a, V: 'a> {
 }
 
 impl<'a, K, V> IterMut<'a, K, V> {
-    /// Returns a iterator of references over the remaining items.
+    /// Returns an iterator of references over the remaining items.
     #[inline]
     pub(super) fn iter(&self) -> Iter<'_, K, V> {
         Iter { base: self.base.rustc_iter() }
@@ -1237,7 +1276,7 @@ pub struct IntoIter<K, V> {
 }
 
 impl<K, V> IntoIter<K, V> {
-    /// Returns a iterator of references over the remaining items.
+    /// Returns an iterator of references over the remaining items.
     #[inline]
     pub(super) fn iter(&self) -> Iter<'_, K, V> {
         Iter { base: self.base.rustc_iter() }
@@ -1340,7 +1379,7 @@ pub struct Drain<'a, K: 'a, V: 'a> {
 }
 
 impl<'a, K, V> Drain<'a, K, V> {
-    /// Returns a iterator of references over the remaining items.
+    /// Returns an iterator of references over the remaining items.
     #[inline]
     pub(super) fn iter(&self) -> Iter<'_, K, V> {
         Iter { base: self.base.rustc_iter() }
@@ -1831,6 +1870,7 @@ impl<K, V, S> Debug for RawEntryBuilder<'_, K, V, S> {
 ///
 /// [`entry`]: HashMap::entry
 #[stable(feature = "rust1", since = "1.0.0")]
+#[cfg_attr(not(test), rustc_diagnostic_item = "HashMapEntry")]
 pub enum Entry<'a, K: 'a, V: 'a> {
     /// An occupied entry.
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -2787,15 +2827,7 @@ where
 
     #[inline]
     fn extend_reserve(&mut self, additional: usize) {
-        // self.base.extend_reserve(additional);
-        // FIXME: hashbrown should implement this method.
-        // But until then, use the same reservation logic:
-
-        // Reserve the entire hint lower bound if the map is empty.
-        // Otherwise reserve half the hint (rounded up), so the map
-        // will only resize twice in the worst case.
-        let reserve = if self.is_empty() { additional } else { (additional + 1) / 2 };
-        self.base.reserve(reserve);
+        self.base.extend_reserve(additional);
     }
 }
 
@@ -2966,9 +2998,11 @@ fn map_entry<'a, K: 'a, V: 'a>(raw: base::RustcEntry<'a, K, V>) -> Entry<'a, K, 
 #[inline]
 pub(super) fn map_try_reserve_error(err: hashbrown::TryReserveError) -> TryReserveError {
     match err {
-        hashbrown::TryReserveError::CapacityOverflow => TryReserveError::CapacityOverflow,
+        hashbrown::TryReserveError::CapacityOverflow => {
+            TryReserveErrorKind::CapacityOverflow.into()
+        }
         hashbrown::TryReserveError::AllocError { layout } => {
-            TryReserveError::AllocError { layout, non_exhaustive: () }
+            TryReserveErrorKind::AllocError { layout, non_exhaustive: () }.into()
         }
     }
 }

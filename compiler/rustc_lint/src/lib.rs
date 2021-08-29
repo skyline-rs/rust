@@ -29,9 +29,9 @@
 #![cfg_attr(test, feature(test))]
 #![feature(array_windows)]
 #![feature(bool_to_option)]
-#![feature(box_syntax)]
 #![feature(box_patterns)]
 #![feature(crate_visibility_modifier)]
+#![feature(format_args_capture)]
 #![feature(iter_order_by)]
 #![feature(iter_zip)]
 #![feature(never_type)]
@@ -151,8 +151,6 @@ macro_rules! late_lint_passes {
                 // FIXME: Look into regression when this is used as a module lint
                 // May Depend on constants elsewhere
                 UnusedBrokenConst: UnusedBrokenConst,
-                // Uses attr::is_used which is untracked, can't be an incremental module pass.
-                UnusedAttributes: UnusedAttributes::new(),
                 // Needs to run after UnusedAttributes as it marks all `feature` attributes as used.
                 UnstableFeatures: UnstableFeatures,
                 // Tracks state across modules
@@ -169,6 +167,8 @@ macro_rules! late_lint_passes {
                 TemporaryCStringAsPtr: TemporaryCStringAsPtr,
                 NonPanicFmt: NonPanicFmt,
                 NoopMethodCall: NoopMethodCall,
+                InvalidAtomicOrdering: InvalidAtomicOrdering,
+                NamedAsmLabels: NamedAsmLabels,
             ]
         );
     };
@@ -244,7 +244,7 @@ fn register_builtins(store: &mut LintStore, no_interleave_lints: bool) {
     macro_rules! register_pass {
         ($method:ident, $ty:ident, $constructor:expr) => {
             store.register_lints(&$ty::get_lints());
-            store.$method(|| box $constructor);
+            store.$method(|| Box::new($constructor));
         };
     }
 
@@ -325,6 +325,9 @@ fn register_builtins(store: &mut LintStore, no_interleave_lints: bool) {
     store.register_renamed("redundant_semicolon", "redundant_semicolons");
     store.register_renamed("overlapping_patterns", "overlapping_range_endpoints");
     store.register_renamed("safe_packed_borrows", "unaligned_references");
+    store.register_renamed("disjoint_capture_migration", "rust_2021_incompatible_closure_captures");
+    store.register_renamed("or_patterns_back_compat", "rust_2021_incompatible_or_patterns");
+    store.register_renamed("non_fmt_panic", "non_fmt_panics");
 
     // These were moved to tool lints, but rustc still sees them when compiling normally, before
     // tool lints are registered, so `check_tool_name_for_backwards_compat` doesn't work. Use
@@ -472,14 +475,14 @@ fn register_builtins(store: &mut LintStore, no_interleave_lints: bool) {
 }
 
 fn register_internals(store: &mut LintStore) {
-    store.register_lints(&DefaultHashTypes::get_lints());
-    store.register_early_pass(|| box DefaultHashTypes::new());
     store.register_lints(&LintPassImpl::get_lints());
-    store.register_early_pass(|| box LintPassImpl);
+    store.register_early_pass(|| Box::new(LintPassImpl));
+    store.register_lints(&DefaultHashTypes::get_lints());
+    store.register_late_pass(|| Box::new(DefaultHashTypes));
     store.register_lints(&ExistingDocKeyword::get_lints());
-    store.register_late_pass(|| box ExistingDocKeyword);
+    store.register_late_pass(|| Box::new(ExistingDocKeyword));
     store.register_lints(&TyTyKind::get_lints());
-    store.register_late_pass(|| box TyTyKind);
+    store.register_late_pass(|| Box::new(TyTyKind));
     store.register_group(
         false,
         "rustc::internal",
@@ -494,3 +497,6 @@ fn register_internals(store: &mut LintStore) {
         ],
     );
 }
+
+#[cfg(test)]
+mod tests;

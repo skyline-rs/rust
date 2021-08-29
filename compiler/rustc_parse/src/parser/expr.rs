@@ -1,4 +1,4 @@
-use super::pat::{RecoverComma, PARAM_EXPECTED};
+use super::pat::{RecoverColon, RecoverComma, PARAM_EXPECTED};
 use super::ty::{AllowPlus, RecoverQPath, RecoverReturnSign};
 use super::{AttrWrapper, BlockMode, ForceCollect, Parser, PathStyle, Restrictions, TokenType};
 use super::{SemiColonMode, SeqSep, TokenExpectType, TrailingToken};
@@ -15,6 +15,8 @@ use rustc_ast::{AnonConst, BinOp, BinOpKind, FnDecl, FnRetTy, MacCall, Param, Ty
 use rustc_ast::{Arm, Async, BlockCheckMode, Expr, ExprKind, Label, Movability, RangeLimits};
 use rustc_ast_pretty::pprust;
 use rustc_errors::{Applicability, DiagnosticBuilder, PResult};
+use rustc_session::lint::builtin::BREAK_WITH_LABEL_AND_LOOP;
+use rustc_session::lint::BuiltinLintDiagnostics;
 use rustc_span::edition::LATEST_STABLE_EDITION;
 use rustc_span::source_map::{self, Span, Spanned};
 use rustc_span::symbol::{kw, sym, Ident, Symbol};
@@ -358,7 +360,7 @@ impl<'a> Parser<'a> {
             &format!("expected expression, found `{}`", pprust::token_to_string(&self.token),),
         );
         err.span_label(self.token.span, "expected expression");
-        self.sess.expr_parentheses_needed(&mut err, lhs.span, Some(pprust::expr_to_string(&lhs)));
+        self.sess.expr_parentheses_needed(&mut err, lhs.span);
         err.emit();
     }
 
@@ -431,7 +433,8 @@ impl<'a> Parser<'a> {
         let span = self.mk_expr_sp(&lhs, lhs.span, rhs_span);
         let limits =
             if op == AssocOp::DotDot { RangeLimits::HalfOpen } else { RangeLimits::Closed };
-        Ok(self.mk_expr(span, self.mk_range(Some(lhs), rhs, limits), AttrVec::new()))
+        let range = self.mk_range(Some(lhs), rhs, limits);
+        Ok(self.mk_expr(span, range, AttrVec::new()))
     }
 
     fn is_at_start_of_range_notation_rhs(&self) -> bool {
@@ -479,7 +482,8 @@ impl<'a> Parser<'a> {
             } else {
                 (lo, None)
             };
-            Ok(this.mk_expr(span, this.mk_range(None, opt_end, limits), attrs.into()))
+            let range = this.mk_range(None, opt_end, limits);
+            Ok(this.mk_expr(span, range, attrs.into()))
         })
     }
 
@@ -694,20 +698,18 @@ impl<'a> Parser<'a> {
                         let expr =
                             mk_expr(self, lhs, self.mk_ty(path.span, TyKind::Path(None, path)));
 
-                        let expr_str = self
-                            .span_to_snippet(expr.span)
-                            .unwrap_or_else(|_| pprust::expr_to_string(&expr));
-
                         self.struct_span_err(self.token.span, &msg)
                             .span_label(
                                 self.look_ahead(1, |t| t.span).to(span_after_type),
                                 "interpreted as generic arguments",
                             )
                             .span_label(self.token.span, format!("not interpreted as {}", op_noun))
-                            .span_suggestion(
-                                expr.span,
+                            .multipart_suggestion(
                                 &format!("try {} the cast value", op_verb),
-                                format!("({})", expr_str),
+                                vec![
+                                    (expr.span.shrink_to_lo(), "(".to_string()),
+                                    (expr.span.shrink_to_hi(), ")".to_string()),
+                                ],
                                 Applicability::MachineApplicable,
                             )
                             .emit();
@@ -1090,7 +1092,7 @@ impl<'a> Parser<'a> {
         // added to the return value after the fact.
         //
         // Therefore, prevent sub-parser from parsing
-        // attributes by giving them a empty "already-parsed" list.
+        // attributes by giving them an empty "already-parsed" list.
         let attrs = AttrVec::new();
 
         // Note: when adding new syntax here, don't forget to adjust `TokenKind::can_begin_expr()`.
@@ -1375,14 +1377,59 @@ impl<'a> Parser<'a> {
         self.maybe_recover_from_bad_qpath(expr, true)
     }
 
-    /// Parse `"('label ":")? break expr?`.
+    /// Parse `"break" (('label (:? expr)?) | expr?)` with `"break"` token already eaten.
+    /// If the label is followed immediately by a `:` token, the label and `:` are
+    /// parsed as part of the expression (i.e. a labeled loop). The language team has
+    /// decided in #87026 to require parentheses as a visual aid to avoid confusion if
+    /// the break expression of an unlabeled break is a labeled loop (as in
+    /// `break 'lbl: loop {}`); a labeled break with an unlabeled loop as its value
+    /// expression only gets a warning for compatibility reasons; and a labeled break
+    /// with a labeled loop does not even get a warning because there is no ambiguity.
     fn parse_break_expr(&mut self, attrs: AttrVec) -> PResult<'a, P<Expr>> {
         let lo = self.prev_token.span;
-        let label = self.eat_label();
-        let kind = if self.token != token::OpenDelim(token::Brace)
+        let mut label = self.eat_label();
+        let kind = if label.is_some() && self.token == token::Colon {
+            // The value expression can be a labeled loop, see issue #86948, e.g.:
+            // `loop { break 'label: loop { break 'label 42; }; }`
+            let lexpr = self.parse_labeled_expr(label.take().unwrap(), AttrVec::new(), true)?;
+            self.struct_span_err(
+                lexpr.span,
+                "parentheses are required around this expression to avoid confusion with a labeled break expression",
+            )
+            .multipart_suggestion(
+                "wrap the expression in parentheses",
+                vec![
+                    (lexpr.span.shrink_to_lo(), "(".to_string()),
+                    (lexpr.span.shrink_to_hi(), ")".to_string()),
+                ],
+                Applicability::MachineApplicable,
+            )
+            .emit();
+            Some(lexpr)
+        } else if self.token != token::OpenDelim(token::Brace)
             || !self.restrictions.contains(Restrictions::NO_STRUCT_LITERAL)
         {
-            self.parse_expr_opt()?
+            let expr = self.parse_expr_opt()?;
+            if let Some(ref expr) = expr {
+                if label.is_some()
+                    && matches!(
+                        expr.kind,
+                        ExprKind::While(_, _, None)
+                            | ExprKind::ForLoop(_, _, _, None)
+                            | ExprKind::Loop(_, None)
+                            | ExprKind::Block(_, None)
+                    )
+                {
+                    self.sess.buffer_lint_with_diagnostic(
+                        BREAK_WITH_LABEL_AND_LOOP,
+                        lo.to(expr.span),
+                        ast::CRATE_NODE_ID,
+                        "this labeled break expression is easy to confuse with an unlabeled break with a labeled value expression",
+                        BuiltinLintDiagnostics::BreakWithLabelAndLoop(expr.span),
+                    );
+                }
+            }
+            expr
         } else {
             None
         };
@@ -1813,14 +1860,14 @@ impl<'a> Parser<'a> {
     /// The `let` token has already been eaten.
     fn parse_let_expr(&mut self, attrs: AttrVec) -> PResult<'a, P<Expr>> {
         let lo = self.prev_token.span;
-        let pat = self.parse_pat_allow_top_alt(None, RecoverComma::Yes)?;
+        let pat = self.parse_pat_allow_top_alt(None, RecoverComma::Yes, RecoverColon::Yes)?;
         self.expect(&token::Eq)?;
         let expr = self.with_res(self.restrictions | Restrictions::NO_STRUCT_LITERAL, |this| {
             this.parse_assoc_expr_with(1 + prec_let_scrutinee_needs_par(), None.into())
         })?;
         let span = lo.to(expr.span);
         self.sess.gated_spans.gate(sym::let_chains, span);
-        Ok(self.mk_expr(span, ExprKind::Let(pat, expr), attrs))
+        Ok(self.mk_expr(span, ExprKind::Let(pat, expr, span), attrs))
     }
 
     /// Parses an `else { ... }` expression (`else` token already eaten).
@@ -1876,7 +1923,7 @@ impl<'a> Parser<'a> {
             _ => None,
         };
 
-        let pat = self.parse_pat_allow_top_alt(None, RecoverComma::Yes)?;
+        let pat = self.parse_pat_allow_top_alt(None, RecoverComma::Yes, RecoverColon::Yes)?;
         if !self.eat_keyword(kw::In) {
             self.error_missing_in_for_loop();
         }
@@ -2083,7 +2130,7 @@ impl<'a> Parser<'a> {
         let attrs = self.parse_outer_attributes()?;
         self.collect_tokens_trailing_token(attrs, ForceCollect::No, |this, attrs| {
             let lo = this.token.span;
-            let pat = this.parse_pat_allow_top_alt(None, RecoverComma::Yes)?;
+            let pat = this.parse_pat_allow_top_alt(None, RecoverComma::Yes, RecoverColon::Yes)?;
             let guard = if this.eat_keyword(kw::If) {
                 let if_span = this.prev_token.span;
                 let cond = this.parse_expr()?;
@@ -2517,13 +2564,13 @@ impl<'a> Parser<'a> {
     }
 
     fn mk_range(
-        &self,
+        &mut self,
         start: Option<P<Expr>>,
         end: Option<P<Expr>>,
         limits: RangeLimits,
     ) -> ExprKind {
         if end.is_none() && limits == RangeLimits::Closed {
-            self.error_inclusive_range_with_no_end(self.prev_token.span);
+            self.inclusive_range_with_incorrect_end(self.prev_token.span);
             ExprKind::Err
         } else {
             ExprKind::Range(start, end, limits)

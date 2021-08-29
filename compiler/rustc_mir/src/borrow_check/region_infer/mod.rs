@@ -21,7 +21,7 @@ use crate::borrow_check::{
     constraints::{
         graph::NormalConstraintGraph, ConstraintSccIndex, OutlivesConstraint, OutlivesConstraintSet,
     },
-    diagnostics::{RegionErrorKind, RegionErrors},
+    diagnostics::{RegionErrorKind, RegionErrors, UniverseInfo},
     member_constraints::{MemberConstraintSet, NllMemberConstraintIndex},
     nll::{PoloniusOutput, ToRegionVid},
     region_infer::reverse_sccs::ReverseSccGraph,
@@ -83,6 +83,9 @@ pub struct RegionInferenceContext<'tcx> {
     /// Map closure bounds to a `Span` that should be used for error reporting.
     closure_bounds_mapping:
         FxHashMap<Location, FxHashMap<(RegionVid, RegionVid), (ConstraintCategory, Span)>>,
+
+    /// Map universe indexes to information on why we created it.
+    universe_causes: IndexVec<ty::UniverseIndex, UniverseInfo<'tcx>>,
 
     /// Contains the minimum universe of any variable within the same
     /// SCC. We will ensure that no SCC contains values that are not
@@ -253,6 +256,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
             Location,
             FxHashMap<(RegionVid, RegionVid), (ConstraintCategory, Span)>,
         >,
+        universe_causes: IndexVec<ty::UniverseIndex, UniverseInfo<'tcx>>,
         type_tests: Vec<TypeTest<'tcx>>,
         liveness_constraints: LivenessValues<RegionVid>,
         elements: &Rc<RegionValueElements>,
@@ -293,6 +297,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
             member_constraints,
             member_constraints_applied: Vec::new(),
             closure_bounds_mapping,
+            universe_causes,
             scc_universes,
             scc_representatives,
             scc_values,
@@ -551,7 +556,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
         polonius_output: Option<Rc<PoloniusOutput>>,
     ) -> (Option<ClosureRegionRequirements<'tcx>>, RegionErrors<'tcx>) {
         let mir_def_id = body.source.def_id();
-        self.propagate_constraints(body, infcx.tcx);
+        self.propagate_constraints(body);
 
         let mut errors_buffer = RegionErrors::new();
 
@@ -599,7 +604,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
     /// for each region variable until all the constraints are
     /// satisfied. Note that some values may grow **too** large to be
     /// feasible, but we check this later.
-    fn propagate_constraints(&mut self, _body: &Body<'tcx>, tcx: TyCtxt<'tcx>) {
+    fn propagate_constraints(&mut self, _body: &Body<'tcx>) {
         debug!("propagate_constraints()");
 
         debug!("propagate_constraints: constraints={:#?}", {
@@ -617,7 +622,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
         // own.
         let constraint_sccs = self.constraint_sccs.clone();
         for scc in constraint_sccs.all_sccs() {
-            self.compute_value_for_scc(scc, tcx);
+            self.compute_value_for_scc(scc);
         }
 
         // Sort the applied member constraints so we can binary search
@@ -629,7 +634,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
     /// computed, by unioning the values of its successors.
     /// Assumes that all successors have been computed already
     /// (which is assured by iterating over SCCs in dependency order).
-    fn compute_value_for_scc(&mut self, scc_a: ConstraintSccIndex, tcx: TyCtxt<'tcx>) {
+    fn compute_value_for_scc(&mut self, scc_a: ConstraintSccIndex) {
         let constraint_sccs = self.constraint_sccs.clone();
 
         // Walk each SCC `B` such that `A: B`...
@@ -652,12 +657,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
         // Now take member constraints into account.
         let member_constraints = self.member_constraints.clone();
         for m_c_i in member_constraints.indices(scc_a) {
-            self.apply_member_constraint(
-                tcx,
-                scc_a,
-                m_c_i,
-                member_constraints.choice_regions(m_c_i),
-            );
+            self.apply_member_constraint(scc_a, m_c_i, member_constraints.choice_regions(m_c_i));
         }
 
         debug!(
@@ -680,30 +680,11 @@ impl<'tcx> RegionInferenceContext<'tcx> {
     /// If we make any changes, returns true, else false.
     fn apply_member_constraint(
         &mut self,
-        tcx: TyCtxt<'tcx>,
         scc: ConstraintSccIndex,
         member_constraint_index: NllMemberConstraintIndex,
         choice_regions: &[ty::RegionVid],
     ) -> bool {
         debug!("apply_member_constraint(scc={:?}, choice_regions={:#?})", scc, choice_regions,);
-
-        if let Some(uh_oh) =
-            choice_regions.iter().find(|&&r| !self.universal_regions.is_universal_region(r))
-        {
-            // FIXME(#61773): This case can only occur with
-            // `impl_trait_in_bindings`, I believe, and we are just
-            // opting not to handle it for now. See #61773 for
-            // details.
-            tcx.sess.delay_span_bug(
-                self.member_constraints[member_constraint_index].definition_span,
-                &format!(
-                    "member constraint for `{:?}` has an option region `{:?}` \
-                     that is not a universal region",
-                    self.member_constraints[member_constraint_index].opaque_type_def_id, uh_oh,
-                ),
-            );
-            return false;
-        }
 
         // Create a mutable vector of the options. We'll try to winnow
         // them down.
@@ -1656,7 +1637,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
         errors_buffer.push(RegionErrorKind::BoundUniversalRegionError {
             longer_fr,
             error_element,
-            fr_origin: NllRegionVariableOrigin::Placeholder(placeholder),
+            placeholder,
         });
     }
 
@@ -1942,8 +1923,12 @@ impl<'tcx> RegionInferenceContext<'tcx> {
     }
 
     /// Get the region outlived by `longer_fr` and live at `element`.
-    crate fn region_from_element(&self, longer_fr: RegionVid, element: RegionElement) -> RegionVid {
-        match element {
+    crate fn region_from_element(
+        &self,
+        longer_fr: RegionVid,
+        element: &RegionElement,
+    ) -> RegionVid {
+        match *element {
             RegionElement::Location(l) => self.find_sub_region_live_at(longer_fr, l),
             RegionElement::RootUniversalRegion(r) => r,
             RegionElement::PlaceholderRegion(error_placeholder) => self
@@ -2161,6 +2146,10 @@ impl<'tcx> RegionInferenceContext<'tcx> {
         debug!("`: sorted_path={:#?}", categorized_path);
 
         categorized_path.remove(0)
+    }
+
+    crate fn universe_info(&self, universe: ty::UniverseIndex) -> UniverseInfo<'tcx> {
+        self.universe_causes[universe].clone()
     }
 }
 

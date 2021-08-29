@@ -1,5 +1,6 @@
 use clippy_utils::consts::{constant, Constant};
 use clippy_utils::diagnostics::span_lint_and_help;
+use clippy_utils::higher;
 use clippy_utils::source::snippet_opt;
 use clippy_utils::{is_direct_expn_of, is_expn_of, match_panic_call};
 use if_chain::if_chain;
@@ -8,14 +9,17 @@ use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for `assert!(true)` and `assert!(false)` calls.
+    /// ### What it does
+    /// Checks for `assert!(true)` and `assert!(false)` calls.
     ///
-    /// **Why is this bad?** Will be optimized out by the compiler or should probably be replaced by a
+    /// ### Why is this bad?
+    /// Will be optimized out by the compiler or should probably be replaced by a
     /// `panic!()` or `unreachable!()`
     ///
-    /// **Known problems:** None
+    /// ### Known problems
+    /// None
     ///
-    /// **Example:**
+    /// ### Example
     /// ```rust,ignore
     /// assert!(false)
     /// assert!(true)
@@ -113,8 +117,8 @@ enum AssertKind {
 /// where `message` is any expression and `c` is a constant bool.
 fn match_assert_with_message<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) -> Option<AssertKind> {
     if_chain! {
-        if let ExprKind::If(cond, then, _) = expr.kind;
-        if let ExprKind::Unary(UnOp::Not, expr) = cond.kind;
+        if let Some(higher::If { cond, then, .. }) = higher::If::hir(expr);
+        if let ExprKind::Unary(UnOp::Not, ref expr) = cond.kind;
         // bind the first argument of the `assert!` macro
         if let Some((Constant::Bool(is_true), _)) = constant(cx, cx.typeck_results(), expr);
         // block

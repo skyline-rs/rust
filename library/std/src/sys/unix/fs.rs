@@ -4,16 +4,32 @@ use crate::ffi::{CStr, CString, OsStr, OsString};
 use crate::fmt;
 use crate::io::{self, Error, IoSlice, IoSliceMut, SeekFrom};
 use crate::mem;
+use crate::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd};
 use crate::path::{Path, PathBuf};
 use crate::ptr;
 use crate::sync::Arc;
 use crate::sys::fd::FileDesc;
 use crate::sys::time::SystemTime;
 use crate::sys::{cvt, cvt_r};
-use crate::sys_common::{AsInner, FromInner};
+use crate::sys_common::{AsInner, AsInnerMut, FromInner, IntoInner};
+
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "ios",
+))]
+use crate::sys::weak::syscall;
+#[cfg(target_os = "macos")]
+use crate::sys::weak::weak;
 
 use libc::{c_int, mode_t};
 
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    all(target_os = "linux", target_env = "gnu")
+))]
+use libc::c_char;
 #[cfg(any(target_os = "linux", target_os = "emscripten", target_os = "android"))]
 use libc::dirfd;
 #[cfg(any(target_os = "linux", target_os = "emscripten"))]
@@ -92,7 +108,7 @@ cfg_has_statx! {{
     // Default `stat64` contains no creation time.
     unsafe fn try_statx(
         fd: c_int,
-        path: *const libc::c_char,
+        path: *const c_char,
         flags: i32,
         mask: u32,
     ) -> Option<io::Result<FileAttr>> {
@@ -107,7 +123,7 @@ cfg_has_statx! {{
         syscall! {
             fn statx(
                 fd: c_int,
-                pathname: *const libc::c_char,
+                pathname: *const c_char,
                 flags: c_int,
                 mask: libc::c_uint,
                 statxbuf: *mut libc::statx
@@ -297,7 +313,7 @@ impl FileAttr {
 
 #[cfg(not(target_os = "netbsd"))]
 impl FileAttr {
-    #[cfg(not(target_os = "vxworks"))]
+    #[cfg(all(not(target_os = "vxworks"), not(target_os = "espidf")))]
     pub fn modified(&self) -> io::Result<SystemTime> {
         Ok(SystemTime::from(libc::timespec {
             tv_sec: self.stat.st_mtime as libc::time_t,
@@ -305,7 +321,7 @@ impl FileAttr {
         }))
     }
 
-    #[cfg(target_os = "vxworks")]
+    #[cfg(any(target_os = "vxworks", target_os = "espidf"))]
     pub fn modified(&self) -> io::Result<SystemTime> {
         Ok(SystemTime::from(libc::timespec {
             tv_sec: self.stat.st_mtime as libc::time_t,
@@ -313,7 +329,7 @@ impl FileAttr {
         }))
     }
 
-    #[cfg(not(target_os = "vxworks"))]
+    #[cfg(all(not(target_os = "vxworks"), not(target_os = "espidf")))]
     pub fn accessed(&self) -> io::Result<SystemTime> {
         Ok(SystemTime::from(libc::timespec {
             tv_sec: self.stat.st_atime as libc::time_t,
@@ -321,7 +337,7 @@ impl FileAttr {
         }))
     }
 
-    #[cfg(target_os = "vxworks")]
+    #[cfg(any(target_os = "vxworks", target_os = "espidf"))]
     pub fn accessed(&self) -> io::Result<SystemTime> {
         Ok(SystemTime::from(libc::timespec {
             tv_sec: self.stat.st_atime as libc::time_t,
@@ -358,7 +374,7 @@ impl FileAttr {
                     }))
                 } else {
                     Err(io::Error::new_const(
-                        io::ErrorKind::Other,
+                        io::ErrorKind::Uncategorized,
                         &"creation time is not available for the filesystem",
                     ))
                 };
@@ -594,7 +610,8 @@ impl DirEntry {
         target_os = "l4re",
         target_os = "fuchsia",
         target_os = "redox",
-        target_os = "vxworks"
+        target_os = "vxworks",
+        target_os = "espidf"
     ))]
     pub fn ino(&self) -> u64 {
         self.entry.d_ino as u64
@@ -633,7 +650,8 @@ impl DirEntry {
         target_os = "emscripten",
         target_os = "l4re",
         target_os = "haiku",
-        target_os = "vxworks"
+        target_os = "vxworks",
+        target_os = "espidf"
     ))]
     fn name_bytes(&self) -> &[u8] {
         unsafe { CStr::from_ptr(self.entry.d_name.as_ptr()).to_bytes() }
@@ -646,6 +664,10 @@ impl DirEntry {
     ))]
     fn name_bytes(&self) -> &[u8] {
         &*self.name
+    }
+
+    pub fn file_name_os_str(&self) -> &OsStr {
+        OsStr::from_bytes(self.name_bytes())
     }
 }
 
@@ -743,16 +765,16 @@ impl File {
         // However, since this is a variadic function, C integer promotion rules mean that on
         // the ABI level, this still gets passed as `c_int` (aka `u32` on Unix platforms).
         let fd = cvt_r(|| unsafe { open64(path.as_ptr(), flags, opts.mode as c_int) })?;
-        Ok(File(FileDesc::new(fd)))
+        Ok(File(unsafe { FileDesc::from_raw_fd(fd) }))
     }
 
     pub fn file_attr(&self) -> io::Result<FileAttr> {
-        let fd = self.0.raw();
+        let fd = self.as_raw_fd();
 
         cfg_has_statx! {
             if let Some(ret) = unsafe { try_statx(
                 fd,
-                b"\0" as *const _ as *const libc::c_char,
+                b"\0" as *const _ as *const c_char,
                 libc::AT_EMPTY_PATH | libc::AT_STATX_SYNC_AS_STAT,
                 libc::STATX_ALL,
             ) } {
@@ -766,7 +788,7 @@ impl File {
     }
 
     pub fn fsync(&self) -> io::Result<()> {
-        cvt_r(|| unsafe { os_fsync(self.0.raw()) })?;
+        cvt_r(|| unsafe { os_fsync(self.as_raw_fd()) })?;
         return Ok(());
 
         #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -780,7 +802,7 @@ impl File {
     }
 
     pub fn datasync(&self) -> io::Result<()> {
-        cvt_r(|| unsafe { os_datasync(self.0.raw()) })?;
+        cvt_r(|| unsafe { os_datasync(self.as_raw_fd()) })?;
         return Ok(());
 
         #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -813,14 +835,14 @@ impl File {
 
     pub fn truncate(&self, size: u64) -> io::Result<()> {
         #[cfg(target_os = "android")]
-        return crate::sys::android::ftruncate64(self.0.raw(), size);
+        return crate::sys::android::ftruncate64(self.as_raw_fd(), size);
 
         #[cfg(not(target_os = "android"))]
         {
             use crate::convert::TryInto;
             let size: off64_t =
                 size.try_into().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-            cvt_r(|| unsafe { ftruncate64(self.0.raw(), size) }).map(drop)
+            cvt_r(|| unsafe { ftruncate64(self.as_raw_fd(), size) }).map(drop)
         }
     }
 
@@ -870,7 +892,7 @@ impl File {
             SeekFrom::End(off) => (libc::SEEK_END, off),
             SeekFrom::Current(off) => (libc::SEEK_CUR, off),
         };
-        let n = cvt(unsafe { lseek64(self.0.raw(), pos, whence) })?;
+        let n = cvt(unsafe { lseek64(self.as_raw_fd(), pos, whence) })?;
         Ok(n as u64)
     }
 
@@ -878,16 +900,8 @@ impl File {
         self.0.duplicate().map(File)
     }
 
-    pub fn fd(&self) -> &FileDesc {
-        &self.0
-    }
-
-    pub fn into_fd(self) -> FileDesc {
-        self.0
-    }
-
     pub fn set_permissions(&self, perm: FilePermissions) -> io::Result<()> {
-        cvt_r(|| unsafe { libc::fchmod(self.0.raw(), perm.mode) })?;
+        cvt_r(|| unsafe { libc::fchmod(self.as_raw_fd(), perm.mode) })?;
         Ok(())
     }
 }
@@ -912,15 +926,57 @@ fn cstr(path: &Path) -> io::Result<CString> {
     Ok(CString::new(path.as_os_str().as_bytes())?)
 }
 
-impl FromInner<c_int> for File {
-    fn from_inner(fd: c_int) -> File {
-        File(FileDesc::new(fd))
+impl AsInner<FileDesc> for File {
+    fn as_inner(&self) -> &FileDesc {
+        &self.0
+    }
+}
+
+impl AsInnerMut<FileDesc> for File {
+    fn as_inner_mut(&mut self) -> &mut FileDesc {
+        &mut self.0
+    }
+}
+
+impl IntoInner<FileDesc> for File {
+    fn into_inner(self) -> FileDesc {
+        self.0
+    }
+}
+
+impl FromInner<FileDesc> for File {
+    fn from_inner(file_desc: FileDesc) -> Self {
+        Self(file_desc)
+    }
+}
+
+impl AsFd for File {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
+
+impl AsRawFd for File {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
+impl IntoRawFd for File {
+    fn into_raw_fd(self) -> RawFd {
+        self.0.into_raw_fd()
+    }
+}
+
+impl FromRawFd for File {
+    unsafe fn from_raw_fd(raw_fd: RawFd) -> Self {
+        Self(FromRawFd::from_raw_fd(raw_fd))
     }
 }
 
 impl fmt::Debug for File {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "netbsd"))]
         fn get_path(fd: c_int) -> Option<PathBuf> {
             let mut p = PathBuf::from("/proc/self/fd");
             p.push(&fd.to_string());
@@ -957,7 +1013,12 @@ impl fmt::Debug for File {
             Some(PathBuf::from(OsString::from_vec(buf)))
         }
 
-        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "vxworks")))]
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "vxworks",
+            target_os = "netbsd"
+        )))]
         fn get_path(_fd: c_int) -> Option<PathBuf> {
             // FIXME(#24570): implement this for other Unix platforms
             None
@@ -983,7 +1044,7 @@ impl fmt::Debug for File {
             None
         }
 
-        let fd = self.0.raw();
+        let fd = self.as_raw_fd();
         let mut b = f.debug_struct("File");
         b.field("fd", &fd);
         if let Some(path) = get_path(fd) {
@@ -1082,16 +1143,29 @@ pub fn link(original: &Path, link: &Path) -> io::Result<()> {
     let original = cstr(original)?;
     let link = cstr(link)?;
     cfg_if::cfg_if! {
-        if #[cfg(any(target_os = "vxworks", target_os = "redox", target_os = "android"))] {
-            // VxWorks, Redox, and old versions of Android lack `linkat`, so use
-            // `link` instead. POSIX leaves it implementation-defined whether
-            // `link` follows symlinks, so rely on the `symlink_hard_link` test
-            // in library/std/src/fs/tests.rs to check the behavior.
+        if #[cfg(any(target_os = "vxworks", target_os = "redox", target_os = "android", target_os = "espidf"))] {
+            // VxWorks, Redox and ESP-IDF lack `linkat`, so use `link` instead. POSIX leaves
+            // it implementation-defined whether `link` follows symlinks, so rely on the
+            // `symlink_hard_link` test in library/std/src/fs/tests.rs to check the behavior.
+            // Android has `linkat` on newer versions, but we happen to know `link`
+            // always has the correct behavior, so it's here as well.
             cvt(unsafe { libc::link(original.as_ptr(), link.as_ptr()) })?;
+        } else if #[cfg(target_os = "macos")] {
+            // On MacOS, older versions (<=10.9) lack support for linkat while newer
+            // versions have it. We want to use linkat if it is available, so we use weak!
+            // to check. `linkat` is preferable to `link` ecause it gives us a flag to
+            // specify how symlinks should be handled. We pass 0 as the flags argument,
+            // meaning it shouldn't follow symlinks.
+            weak!(fn linkat(c_int, *const c_char, c_int, *const c_char, c_int) -> c_int);
+
+            if let Some(f) = linkat.get() {
+                cvt(unsafe { f(libc::AT_FDCWD, original.as_ptr(), libc::AT_FDCWD, link.as_ptr(), 0) })?;
+            } else {
+                cvt(unsafe { libc::link(original.as_ptr(), link.as_ptr()) })?;
+            };
         } else {
-            // Use `linkat` with `AT_FDCWD` instead of `link` as `linkat` gives
-            // us a flag to specify how symlinks should be handled. Pass 0 as
-            // the flags argument, meaning don't follow symlinks.
+            // Where we can, use `linkat` instead of `link`; see the comment above
+            // this one for details on why.
             cvt(unsafe { libc::linkat(libc::AT_FDCWD, original.as_ptr(), libc::AT_FDCWD, link.as_ptr(), 0) })?;
         }
     }
@@ -1162,6 +1236,18 @@ fn open_from(from: &Path) -> io::Result<(crate::fs::File, crate::fs::Metadata)> 
     Ok((reader, metadata))
 }
 
+#[cfg(target_os = "espidf")]
+fn open_to_and_set_permissions(
+    to: &Path,
+    reader_metadata: crate::fs::Metadata,
+) -> io::Result<(crate::fs::File, crate::fs::Metadata)> {
+    use crate::fs::OpenOptions;
+    let writer = OpenOptions::new().open(to)?;
+    let writer_metadata = writer.metadata()?;
+    Ok((writer, writer_metadata))
+}
+
+#[cfg(not(target_os = "espidf"))]
 fn open_to_and_set_permissions(
     to: &Path,
     reader_metadata: crate::fs::Metadata,
@@ -1274,7 +1360,7 @@ pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
         fn fclonefileat(
             srcfd: libc::c_int,
             dst_dirfd: libc::c_int,
-            dst: *const libc::c_char,
+            dst: *const c_char,
             flags: libc::c_int
         ) -> libc::c_int
     }

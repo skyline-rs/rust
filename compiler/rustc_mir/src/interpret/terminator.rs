@@ -12,18 +12,13 @@ use rustc_target::abi::{self, LayoutOf as _};
 use rustc_target::spec::abi::Abi;
 
 use super::{
-    FnVal, ImmTy, InterpCx, InterpResult, MPlaceTy, Machine, OpTy, PlaceTy, StackPopCleanup,
-    StackPopUnwind,
+    FnVal, ImmTy, InterpCx, InterpResult, MPlaceTy, Machine, OpTy, PlaceTy, Scalar,
+    StackPopCleanup, StackPopUnwind,
 };
 
 impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
     fn fn_can_unwind(&self, attrs: CodegenFnAttrFlags, abi: Abi) -> bool {
-        layout::fn_can_unwind(
-            self.tcx.sess.panic_strategy(),
-            attrs,
-            layout::conv_from_spec_abi(*self.tcx, abi),
-            abi,
-        )
+        layout::fn_can_unwind(*self.tcx, attrs, abi)
     }
 
     pub(super) fn eval_terminator(
@@ -72,12 +67,12 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 let (fn_val, abi, caller_can_unwind) = match *func.layout.ty.kind() {
                     ty::FnPtr(sig) => {
                         let caller_abi = sig.abi();
-                        let fn_ptr = self.read_scalar(&func)?.check_init()?;
+                        let fn_ptr = self.read_pointer(&func)?;
                         let fn_val = self.memory.get_fn(fn_ptr)?;
                         (
                             fn_val,
                             caller_abi,
-                            self.fn_can_unwind(layout::fn_ptr_codegen_fn_attr_flags(), caller_abi),
+                            self.fn_can_unwind(CodegenFnAttrFlags::empty(), caller_abi),
                         )
                     }
                     ty::FnDef(def_id, substs) => {
@@ -454,12 +449,12 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                     }
                     None => {
                         // Unsized self.
-                        args[0].assert_mem_place(self)
+                        args[0].assert_mem_place()
                     }
                 };
                 // Find and consult vtable
-                let vtable = receiver_place.vtable();
-                let drop_fn = self.get_vtable_slot(vtable, u64::try_from(idx).unwrap())?;
+                let vtable = self.scalar_to_ptr(receiver_place.vtable());
+                let fn_val = self.get_vtable_slot(vtable, u64::try_from(idx).unwrap())?;
 
                 // `*mut receiver_place.layout.ty` is almost the layout that we
                 // want for args[0]: We have to project to field 0 because we want
@@ -468,11 +463,13 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 let receiver_ptr_ty = self.tcx.mk_mut_ptr(receiver_place.layout.ty);
                 let this_receiver_ptr = self.layout_of(receiver_ptr_ty)?.field(self, 0)?;
                 // Adjust receiver argument.
-                args[0] =
-                    OpTy::from(ImmTy::from_immediate(receiver_place.ptr.into(), this_receiver_ptr));
+                args[0] = OpTy::from(ImmTy::from_immediate(
+                    Scalar::from_maybe_pointer(receiver_place.ptr, self).into(),
+                    this_receiver_ptr,
+                ));
                 trace!("Patched self operand to {:#?}", args[0]);
                 // recurse with concrete function
-                self.eval_fn_call(drop_fn, caller_abi, &args, ret, unwind)
+                self.eval_fn_call(fn_val, caller_abi, &args, ret, unwind)
             }
         }
     }
@@ -499,12 +496,12 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         };
 
         let arg = ImmTy::from_immediate(
-            place.to_ref(),
+            place.to_ref(self),
             self.layout_of(self.tcx.mk_mut_ptr(place.layout.ty))?,
         );
 
         let ty = self.tcx.mk_unit(); // return type is ()
-        let dest = MPlaceTy::dangling(self.layout_of(ty)?, self);
+        let dest = MPlaceTy::dangling(self.layout_of(ty)?);
 
         self.eval_fn_call(
             FnVal::Instance(instance),

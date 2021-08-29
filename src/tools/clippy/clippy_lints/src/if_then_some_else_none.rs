@@ -1,6 +1,6 @@
 use clippy_utils::diagnostics::span_lint_and_help;
 use clippy_utils::source::snippet_with_macro_callsite;
-use clippy_utils::{is_else_clause, is_lang_ctor, meets_msrv, msrvs};
+use clippy_utils::{higher, is_else_clause, is_lang_ctor, meets_msrv, msrvs};
 use if_chain::if_chain;
 use rustc_hir::LangItem::{OptionNone, OptionSome};
 use rustc_hir::{Expr, ExprKind};
@@ -10,14 +10,13 @@ use rustc_semver::RustcVersion;
 use rustc_session::{declare_tool_lint, impl_lint_pass};
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for if-else that could be written to `bool::then`.
+    /// ### What it does
+    /// Checks for if-else that could be written to `bool::then`.
     ///
-    /// **Why is this bad?** Looks a little redundant. Using `bool::then` helps it have less lines of code.
+    /// ### Why is this bad?
+    /// Looks a little redundant. Using `bool::then` helps it have less lines of code.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust
     /// # let v = vec![0];
     /// let a = if v.is_empty() {
@@ -71,7 +70,7 @@ impl LateLintPass<'_> for IfThenSomeElseNone {
         }
 
         if_chain! {
-            if let ExprKind::If(cond, then, Some(els)) = expr.kind;
+            if let Some(higher::If { cond, then, r#else: Some(els) }) = higher::If::hir(expr);
             if let ExprKind::Block(then_block, _) = then.kind;
             if let Some(then_expr) = then_block.expr;
             if let ExprKind::Call(then_call, [then_arg]) = then_expr.kind;

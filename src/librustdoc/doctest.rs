@@ -99,20 +99,20 @@ crate fn run(options: Options) -> Result<(), ErrorReported> {
         stderr: None,
         lint_caps,
         parse_sess_created: None,
-        register_lints: Some(box crate::lint::register_lints),
+        register_lints: Some(Box::new(crate::lint::register_lints)),
         override_queries: None,
         make_codegen_backend: None,
         registry: rustc_driver::diagnostics_registry(),
     };
 
-    let mut test_args = options.test_args.clone();
+    let test_args = options.test_args.clone();
     let display_warnings = options.display_warnings;
+    let nocapture = options.nocapture;
     let externs = options.externs.clone();
     let json_unused_externs = options.json_unused_externs;
 
     let res = interface::run_compiler(config, |compiler| {
         compiler.enter(|queries| {
-            let _lower_to_hir = queries.lower_to_hir()?;
             let mut global_ctxt = queries.global_ctxt()?.take();
 
             let collector = global_ctxt.enter(|tcx| {
@@ -144,7 +144,7 @@ crate fn run(options: Options) -> Result<(), ErrorReported> {
                 hir_collector.visit_testable(
                     "".to_string(),
                     CRATE_HIR_ID,
-                    krate.item.inner,
+                    krate.module().inner,
                     |this| {
                         intravisit::walk_crate(this, krate);
                     },
@@ -166,13 +166,7 @@ crate fn run(options: Options) -> Result<(), ErrorReported> {
         Err(ErrorReported) => return Err(ErrorReported),
     };
 
-    test_args.insert(0, "rustdoctest".to_string());
-
-    testing::test_main(
-        &test_args,
-        tests,
-        Some(testing::Options::new().display_output(display_warnings)),
-    );
+    run_tests(test_args, nocapture, display_warnings, tests);
 
     // Collect and warn about unused externs, but only if we've gotten
     // reports for each doctest
@@ -213,6 +207,19 @@ crate fn run(options: Options) -> Result<(), ErrorReported> {
     }
 
     Ok(())
+}
+
+crate fn run_tests(
+    mut test_args: Vec<String>,
+    nocapture: bool,
+    display_warnings: bool,
+    tests: Vec<test::TestDescAndFn>,
+) {
+    test_args.insert(0, "rustdoctest".to_string());
+    if nocapture {
+        test_args.push("--nocapture".to_string());
+    }
+    test::test_main(&test_args, tests, Some(test::Options::new().display_output(display_warnings)));
 }
 
 // Look for `#![doc(test(no_crate_inject))]`, used by crates in the std facade.
@@ -461,7 +468,16 @@ fn run_test(
         cmd.current_dir(run_directory);
     }
 
-    match cmd.output() {
+    let result = if options.nocapture {
+        cmd.status().map(|status| process::Output {
+            status,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    } else {
+        cmd.output()
+    };
+    match result {
         Err(e) => return Err(TestFailure::ExecutionError(e)),
         Ok(out) => {
             if should_panic && out.status.success() {
@@ -514,7 +530,7 @@ crate fn make_test(
     // Uses librustc_ast to parse the doctest and find if there's a main fn and the extern
     // crate already is included.
     let result = rustc_driver::catch_fatal_errors(|| {
-        rustc_span::with_session_globals(edition, || {
+        rustc_span::create_session_if_not_set_then(edition, |_| {
             use rustc_errors::emitter::{Emitter, EmitterWriter};
             use rustc_errors::Handler;
             use rustc_parse::maybe_new_parser_from_source_str;
@@ -533,10 +549,10 @@ crate fn make_test(
                     .supports_color();
 
             let emitter =
-                EmitterWriter::new(box io::sink(), None, false, false, false, None, false);
+                EmitterWriter::new(Box::new(io::sink()), None, false, false, false, None, false);
 
             // FIXME(misdreavus): pass `-Z treat-err-as-bug` to the doctest parser
-            let handler = Handler::with_emitter(false, None, box emitter);
+            let handler = Handler::with_emitter(false, None, Box::new(emitter));
             let sess = ParseSess::with_span_handler(handler, sm);
 
             let mut found_main = false;
@@ -770,7 +786,7 @@ crate trait Tester {
 }
 
 crate struct Collector {
-    crate tests: Vec<testing::TestDescAndFn>,
+    crate tests: Vec<test::TestDescAndFn>,
 
     // The name of the test displayed to the user, separated by `::`.
     //
@@ -931,24 +947,22 @@ impl Tester for Collector {
         };
 
         debug!("creating test {}: {}", name, test);
-        self.tests.push(testing::TestDescAndFn {
-            desc: testing::TestDesc {
-                name: testing::DynTestName(name),
+        self.tests.push(test::TestDescAndFn {
+            desc: test::TestDesc {
+                name: test::DynTestName(name),
                 ignore: match config.ignore {
                     Ignore::All => true,
                     Ignore::None => false,
                     Ignore::Some(ref ignores) => ignores.iter().any(|s| target_str.contains(s)),
                 },
                 // compiler failures are test failures
-                should_panic: testing::ShouldPanic::No,
+                should_panic: test::ShouldPanic::No,
                 allow_fail: config.allow_fail,
-                #[cfg(not(bootstrap))]
                 compile_fail: config.compile_fail,
-                #[cfg(not(bootstrap))]
                 no_run,
-                test_type: testing::TestType::DocTest,
+                test_type: test::TestType::DocTest,
             },
-            testfn: testing::DynTestFn(box move || {
+            testfn: test::DynTestFn(Box::new(move || {
                 let report_unused_externs = |uext| {
                     unused_externs.lock().unwrap().push(uext);
                 };
@@ -1028,9 +1042,9 @@ impl Tester for Collector {
                         }
                     }
 
-                    panic::resume_unwind(box ());
+                    panic::resume_unwind(Box::new(()));
                 }
-            }),
+            })),
         });
     }
 
@@ -1157,10 +1171,21 @@ impl<'a, 'hir, 'tcx> intravisit::Visitor<'hir> for HirCollector<'a, 'hir, 'tcx> 
     }
 
     fn visit_item(&mut self, item: &'hir hir::Item<'_>) {
-        let name = if let hir::ItemKind::Impl(impl_) = &item.kind {
-            rustc_hir_pretty::id_to_string(&self.map, impl_.self_ty.hir_id)
-        } else {
-            item.ident.to_string()
+        let name = match &item.kind {
+            hir::ItemKind::Macro(ref macro_def) => {
+                // FIXME(#88038): Non exported macros have historically not been tested,
+                // but we really ought to start testing them.
+                let def_id = item.def_id.to_def_id();
+                if macro_def.macro_rules && !self.tcx.has_attr(def_id, sym::macro_export) {
+                    intravisit::walk_item(self, item);
+                    return;
+                }
+                item.ident.to_string()
+            }
+            hir::ItemKind::Impl(impl_) => {
+                rustc_hir_pretty::id_to_string(&self.map, impl_.self_ty.hir_id)
+            }
+            _ => item.ident.to_string(),
         };
 
         self.visit_testable(name, item.hir_id(), item.span, |this| {
@@ -1201,15 +1226,6 @@ impl<'a, 'hir, 'tcx> intravisit::Visitor<'hir> for HirCollector<'a, 'hir, 'tcx> 
         self.visit_testable(f.ident.to_string(), f.hir_id, f.span, |this| {
             intravisit::walk_field_def(this, f);
         });
-    }
-
-    fn visit_macro_def(&mut self, macro_def: &'hir hir::MacroDef<'_>) {
-        self.visit_testable(
-            macro_def.ident.to_string(),
-            macro_def.hir_id(),
-            macro_def.span,
-            |_| (),
-        );
     }
 }
 

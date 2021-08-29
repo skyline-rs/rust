@@ -14,6 +14,7 @@ use rustc_span::symbol::Ident;
 use rustc_span::FileName;
 
 use std::cell::Cell;
+use std::fmt::Write;
 use std::path::Path;
 
 pub use self::PpMode::*;
@@ -293,18 +294,6 @@ struct TypedAnnotation<'tcx> {
     maybe_typeck_results: Cell<Option<&'tcx ty::TypeckResults<'tcx>>>,
 }
 
-impl<'tcx> TypedAnnotation<'tcx> {
-    /// Gets the type-checking results for the current body.
-    /// As this will ICE if called outside bodies, only call when working with
-    /// `Expr` or `Pat` nodes (they are guaranteed to be found only in bodies).
-    #[track_caller]
-    fn typeck_results(&self) -> &'tcx ty::TypeckResults<'tcx> {
-        self.maybe_typeck_results
-            .get()
-            .expect("`TypedAnnotation::typeck_results` called outside of body")
-    }
-}
-
 impl<'tcx> HirPrinterSupport<'tcx> for TypedAnnotation<'tcx> {
     fn sess(&self) -> &Session {
         &self.tcx.sess
@@ -336,10 +325,20 @@ impl<'tcx> pprust_hir::PpAnn for TypedAnnotation<'tcx> {
     }
     fn post(&self, s: &mut pprust_hir::State<'_>, node: pprust_hir::AnnNode<'_>) {
         if let pprust_hir::AnnNode::Expr(expr) = node {
-            s.s.space();
-            s.s.word("as");
-            s.s.space();
-            s.s.word(self.typeck_results().expr_ty(expr).to_string());
+            let typeck_results = self.maybe_typeck_results.get().or_else(|| {
+                self.tcx
+                    .hir()
+                    .maybe_body_owned_by(self.tcx.hir().local_def_id_to_hir_id(expr.hir_id.owner))
+                    .map(|body_id| self.tcx.typeck_body(body_id))
+            });
+
+            if let Some(typeck_results) = typeck_results {
+                s.s.space();
+                s.s.word("as");
+                s.s.space();
+                s.s.word(typeck_results.expr_ty(expr).to_string());
+            }
+
             s.pclose();
         }
     }
@@ -473,7 +472,6 @@ fn print_with_analysis(
     ofile: Option<&Path>,
 ) -> Result<(), ErrorReported> {
     tcx.analysis(())?;
-
     let out = match ppm {
         Mir => {
             let mut out = Vec::new();
@@ -488,8 +486,18 @@ fn print_with_analysis(
         }
 
         ThirTree => {
-            // FIXME(rust-lang/project-thir-unsafeck#8)
-            todo!()
+            let mut out = String::new();
+            abort_on_err(rustc_typeck::check_crate(tcx), tcx.sess);
+            debug!("pretty printing THIR tree");
+            for did in tcx.body_owners() {
+                let _ = writeln!(
+                    out,
+                    "{:?}:\n{}\n",
+                    did,
+                    tcx.thir_tree(ty::WithOptConstParam::unknown(did))
+                );
+            }
+            out
         }
 
         _ => unreachable!(),

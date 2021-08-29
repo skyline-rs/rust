@@ -226,7 +226,7 @@ use rustc_session::config::{self, CrateType};
 use rustc_session::filesearch::{FileDoesntMatch, FileMatches, FileSearch};
 use rustc_session::search_paths::PathKind;
 use rustc_session::utils::CanonicalizedPath;
-use rustc_session::{CrateDisambiguator, Session};
+use rustc_session::Session;
 use rustc_span::symbol::{sym, Symbol};
 use rustc_span::Span;
 use rustc_target::spec::{Target, TargetTriple};
@@ -787,7 +787,7 @@ pub fn find_plugin_registrar(
     metadata_loader: &dyn MetadataLoader,
     span: Span,
     name: Symbol,
-) -> (PathBuf, CrateDisambiguator) {
+) -> PathBuf {
     match find_plugin_registrar_impl(sess, metadata_loader, name) {
         Ok(res) => res,
         // `core` is always available if we got as far as loading plugins.
@@ -799,7 +799,7 @@ fn find_plugin_registrar_impl<'a>(
     sess: &'a Session,
     metadata_loader: &dyn MetadataLoader,
     name: Symbol,
-) -> Result<(PathBuf, CrateDisambiguator), CrateError> {
+) -> Result<PathBuf, CrateError> {
     info!("find plugin registrar `{}`", name);
     let mut locator = CrateLocator::new(
         sess,
@@ -816,7 +816,7 @@ fn find_plugin_registrar_impl<'a>(
 
     match locator.maybe_load_library_crate()? {
         Some(library) => match library.source.dylib {
-            Some(dylib) => Ok((dylib.0, library.metadata.get_root().disambiguator())),
+            Some(dylib) => Ok(dylib.0),
             None => Err(CrateError::NonDylibPlugin(name)),
         },
         None => Err(locator.into_error()),
@@ -1080,7 +1080,10 @@ impl CrateError {
                                 locator.triple
                             ));
                         }
-                        if missing_core && std::env::var("RUSTUP_HOME").is_ok() {
+                        // NOTE: this suggests using rustup, even though the user may not have it installed.
+                        // That's because they could choose to install it; or this may give them a hint which
+                        // target they need to install from their distro.
+                        if missing_core {
                             err.help(&format!(
                                 "consider downloading the target with `rustup target add {}`",
                                 locator.triple
@@ -1097,11 +1100,11 @@ impl CrateError {
                                 current_crate
                             ));
                         }
-                        if sess.is_nightly_build() && std::env::var("CARGO").is_ok() {
+                        if sess.is_nightly_build() {
                             err.help("consider building the standard library from source with `cargo build -Zbuild-std`");
                         }
-                    } else if Some(crate_name)
-                        == sess.opts.debugging_opts.profiler_runtime.as_deref().map(Symbol::intern)
+                    } else if crate_name
+                        == Symbol::intern(&sess.opts.debugging_opts.profiler_runtime)
                     {
                         err.note(&"the compiler may have been built without the profiler runtime");
                     }

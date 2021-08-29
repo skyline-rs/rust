@@ -4,11 +4,13 @@ use hir::ItemKind;
 use rustc_ast::Mutability;
 use rustc_errors::Applicability;
 use rustc_hir as hir;
-use rustc_middle::ty::{Ref, Ty};
-use rustc_session::lint::builtin::FUTURE_PRELUDE_COLLISION;
+use rustc_middle::ty::subst::InternalSubsts;
+use rustc_middle::ty::{Adt, Ref, Ty};
+use rustc_session::lint::builtin::RUST_2021_PRELUDE_COLLISIONS;
 use rustc_span::symbol::kw::Underscore;
 use rustc_span::symbol::{sym, Ident};
 use rustc_span::Span;
+use rustc_trait_selection::infer::InferCtxtExt;
 
 use crate::check::{
     method::probe::{self, Pick},
@@ -57,10 +59,17 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             {
                 return;
             }
+
+            // if it's an inherent `self` method (not `&self` or `&mut self`), it will take
+            // precedence over the `TryInto` impl, and thus won't break in 2021 edition
+            if pick.autoderefs == 0 && pick.autoref_or_ptr_adjustment.is_none() {
+                return;
+            }
+
             // Inherent impls only require not relying on autoref and autoderef in order to
             // ensure that the trait implementation won't be used
             self.tcx.struct_span_lint_hir(
-                FUTURE_PRELUDE_COLLISION,
+                RUST_2021_PRELUDE_COLLISIONS,
                 self_expr.hir_id,
                 self_expr.span,
                 |lint| {
@@ -121,7 +130,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // trait implementations require full disambiguation to not clash with the new prelude
             // additions (i.e. convert from dot-call to fully-qualified call)
             self.tcx.struct_span_lint_hir(
-                FUTURE_PRELUDE_COLLISION,
+                RUST_2021_PRELUDE_COLLISIONS,
                 call_expr.hir_id,
                 call_expr.span,
                 |lint| {
@@ -199,13 +208,32 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             return;
         }
 
+        // For from_iter, check if the type actually implements FromIterator.
+        // If we know it does not, we don't need to warn.
+        if method_name.name == sym::from_iter {
+            if let Some(trait_def_id) = self.tcx.get_diagnostic_item(sym::FromIterator) {
+                if !self
+                    .infcx
+                    .type_implements_trait(
+                        trait_def_id,
+                        self_ty,
+                        InternalSubsts::empty(),
+                        self.param_env,
+                    )
+                    .may_apply()
+                {
+                    return;
+                }
+            }
+        }
+
         // No need to lint if this is an inherent method called on a specific type, like `Vec::foo(...)`,
         // since such methods take precedence over trait methods.
         if matches!(pick.kind, probe::PickKind::InherentImplPick) {
             return;
         }
 
-        self.tcx.struct_span_lint_hir(FUTURE_PRELUDE_COLLISION, expr_id, span, |lint| {
+        self.tcx.struct_span_lint_hir(RUST_2021_PRELUDE_COLLISIONS, expr_id, span, |lint| {
             // "type" refers to either a type or, more likely, a trait from which
             // the associated function or method is from.
             let trait_path = self.trait_path_or_bare_name(span, expr_id, pick.item.container.id());
@@ -227,16 +255,31 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 method_name.name
             ));
 
-            let self_ty = self
+            let self_ty_name = self
                 .sess()
                 .source_map()
                 .span_to_snippet(self_ty_span)
                 .unwrap_or_else(|_| self_ty.to_string());
 
+            let self_ty_generics_count = match self_ty.kind() {
+                // Get the number of generics the self type has (if an Adt) unless we can determine that
+                // the user has written the self type with generics already which we (naively) do by looking
+                // for a "<" in `self_ty_name`.
+                Adt(def, _) if !self_ty_name.contains('<') => self.tcx.generics_of(def.did).count(),
+                _ => 0,
+            };
+            let self_ty_generics = if self_ty_generics_count > 0 {
+                format!("<{}>", vec!["_"; self_ty_generics_count].join(", "))
+            } else {
+                String::new()
+            };
             lint.span_suggestion(
                 span,
                 "disambiguate the associated function",
-                format!("<{} as {}>::{}", self_ty, trait_name, method_name.name,),
+                format!(
+                    "<{}{} as {}>::{}",
+                    self_ty_name, self_ty_generics, trait_name, method_name.name,
+                ),
                 Applicability::MachineApplicable,
             );
 
@@ -314,7 +357,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             if let Ok(expr_text) = self.sess().source_map().span_to_snippet(expr.span) {
                 (expr_text, true)
             } else {
-                (format!("(..)"), false)
+                ("(..)".to_string(), false)
             };
 
         let adjusted_text = if let Some(probe::AutorefOrPtrAdjustment::ToConstPtr) =

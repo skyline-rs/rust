@@ -52,6 +52,7 @@ const ANNOTATIONS_TO_IGNORE: &[&str] = &[
     "// error-pattern",
     "// gdb",
     "// lldb",
+    "// cdb",
     "// normalize-stderr-test",
 ];
 
@@ -65,7 +66,7 @@ enum LIUState {
     EXP_END,
 }
 
-/// Returns `true` if `line` appears to be a line comment containing an URL,
+/// Returns `true` if `line` appears to be a line comment containing a URL,
 /// possibly with a Markdown link label in front, and nothing else.
 /// The Markdown link label, if present, may not contain whitespace.
 /// Lines of this form are allowed to be overlength, because Markdown
@@ -343,7 +344,10 @@ pub fn check(path: &Path, bad: &mut bool) {
             } else {
                 trailing_new_lines = 0;
             }
-            lines = i;
+
+            if !line.trim().starts_with("//") {
+                lines += 1;
+            }
         }
         if leading_new_lines {
             tidy_error!(bad, "{}: leading newline", file.display());

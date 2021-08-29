@@ -1,4 +1,5 @@
 use clippy_utils::diagnostics::{span_lint, span_lint_and_sugg};
+use clippy_utils::higher;
 use clippy_utils::source::snippet_block_with_applicability;
 use clippy_utils::ty::implements_trait;
 use clippy_utils::{differing_macro_contexts, get_parent_expr};
@@ -13,14 +14,14 @@ use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::sym;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for `if` conditions that use blocks containing an
+    /// ### What it does
+    /// Checks for `if` conditions that use blocks containing an
     /// expression, statements or conditions that use closures with blocks.
     ///
-    /// **Why is this bad?** Style, using blocks in the condition makes it hard to read.
+    /// ### Why is this bad?
+    /// Style, using blocks in the condition makes it hard to read.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Examples:**
+    /// ### Examples
     /// ```rust
     /// // Bad
     /// if { true } { /* ... */ }
@@ -92,7 +93,7 @@ impl<'tcx> LateLintPass<'tcx> for BlocksInIfConditions {
         if in_external_macro(cx.sess(), expr.span) {
             return;
         }
-        if let ExprKind::If(cond, _, _) = &expr.kind {
+        if let Some(higher::If { cond, .. }) = higher::If::hir(expr) {
             if let ExprKind::Block(block, _) = &cond.kind {
                 if block.rules == BlockCheckMode::DefaultBlock {
                     if block.stmts.is_empty() {

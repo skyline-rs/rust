@@ -12,21 +12,20 @@ use rustc_span::symbol::Ident;
 use std::iter;
 
 declare_clippy_lint! {
-    /// **What it does:**
+    /// ### What it does
     /// Detects uses of `Vec::sort_by` passing in a closure
     /// which compares the two arguments, either directly or indirectly.
     ///
-    /// **Why is this bad?**
+    /// ### Why is this bad?
     /// It is more clear to use `Vec::sort_by_key` (or `Vec::sort` if
     /// possible) than to use `Vec::sort_by` and a more complicated
     /// closure.
     ///
-    /// **Known problems:**
+    /// ### Known problems
     /// If the suggested `Vec::sort_by_key` uses Reverse and it isn't already
     /// imported by a use statement, then it will need to be added manually.
     ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust
     /// # struct A;
     /// # impl A { fn foo(&self) {} }
@@ -219,7 +218,7 @@ fn detect_lint(cx: &LateContext<'_>, expr: &Expr<'_>) -> Option<LintTrigger> {
 
 fn expr_borrows(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     let ty = cx.typeck_results().expr_ty(expr);
-    matches!(ty.kind(), ty::Ref(..)) || ty.walk().any(|arg| matches!(arg.unpack(), GenericArgKind::Lifetime(_)))
+    matches!(ty.kind(), ty::Ref(..)) || ty.walk(cx.tcx).any(|arg| matches!(arg.unpack(), GenericArgKind::Lifetime(_)))
 }
 
 impl LateLintPass<'_> for UnnecessarySortBy {

@@ -22,7 +22,7 @@ use rustc_middle::span_bug;
 use rustc_middle::ty;
 use rustc_session::lint::builtin::{PUB_USE_OF_PRIVATE_EXTERN_CRATE, UNUSED_IMPORTS};
 use rustc_session::lint::BuiltinLintDiagnostics;
-use rustc_span::hygiene::ExpnId;
+use rustc_span::hygiene::LocalExpnId;
 use rustc_span::lev_distance::find_best_match_for_name;
 use rustc_span::symbol::{kw, Ident, Symbol};
 use rustc_span::{MultiSpan, Span};
@@ -237,8 +237,9 @@ impl<'a> Resolver<'a> {
                 if ns == TypeNS {
                     if ident.name == kw::Crate || ident.name == kw::DollarCrate {
                         let module = self.resolve_crate_root(ident);
-                        let binding = (module, ty::Visibility::Public, module.span, ExpnId::root())
-                            .to_name_binding(self.arenas);
+                        let binding =
+                            (module, ty::Visibility::Public, module.span, LocalExpnId::ROOT)
+                                .to_name_binding(self.arenas);
                         return Ok(binding);
                     } else if ident.name == kw::Super || ident.name == kw::SelfLower {
                         // FIXME: Implement these with renaming requirements so that e.g.
@@ -265,7 +266,7 @@ impl<'a> Resolver<'a> {
             self.resolution(module, key).try_borrow_mut().map_err(|_| (Determined, Weak::No))?; // This happens when there is a cycle of imports.
 
         if let Some(binding) = resolution.binding {
-            if !restricted_shadowing && binding.expansion != ExpnId::root() {
+            if !restricted_shadowing && binding.expansion != LocalExpnId::ROOT {
                 if let NameBindingKind::Res(_, true) = binding.kind {
                     self.macro_expanded_macro_export_errors.insert((path_span, binding.span));
                 }
@@ -302,12 +303,12 @@ impl<'a> Resolver<'a> {
                     if self.last_import_segment && check_usable(self, binding).is_err() {
                         Err((Determined, Weak::No))
                     } else {
-                        self.record_use(ident, ns, binding, restricted_shadowing);
+                        self.record_use(ident, binding, restricted_shadowing);
 
                         if let Some(shadowed_glob) = resolution.shadowed_glob {
                             // Forbid expanded shadowing to avoid time travel.
                             if restricted_shadowing
-                                && binding.expansion != ExpnId::root()
+                                && binding.expansion != LocalExpnId::ROOT
                                 && binding.res() != shadowed_glob.res()
                             {
                                 self.ambiguity_errors.push(AmbiguityError {
@@ -521,7 +522,7 @@ impl<'a> Resolver<'a> {
                             if old_glob { (old_binding, binding) } else { (binding, old_binding) };
                         if glob_binding.res() != nonglob_binding.res()
                             && key.ns == MacroNS
-                            && nonglob_binding.expansion != ExpnId::root()
+                            && nonglob_binding.expansion != LocalExpnId::ROOT
                         {
                             resolution.binding = Some(this.ambiguity(
                                 AmbiguityKind::GlobVsExpanded,
@@ -608,9 +609,9 @@ impl<'a> Resolver<'a> {
             self.per_ns(|this, ns| {
                 let key = this.new_key(target, ns);
                 let _ = this.try_define(import.parent_scope.module, key, dummy_binding);
-                // Consider erroneous imports used to avoid duplicate diagnostics.
-                this.record_use(target, ns, dummy_binding, false);
             });
+            // Consider erroneous imports used to avoid duplicate diagnostics.
+            self.record_use(target, dummy_binding, false);
         }
     }
 }
@@ -708,7 +709,7 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
                 }
             } else if is_indeterminate {
                 // Consider erroneous imports used to avoid duplicate diagnostics.
-                self.r.used_imports.insert((import.id, TypeNS));
+                self.r.used_imports.insert(import.id);
                 let path = import_path_to_string(
                     &import.module_path.iter().map(|seg| seg.ident).collect::<Vec<_>>(),
                     &import.kind,
@@ -901,7 +902,7 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
         import.vis.set(orig_vis);
         if let PathResult::Failed { .. } | PathResult::NonModule(..) = path_res {
             // Consider erroneous imports used to avoid duplicate diagnostics.
-            self.r.used_imports.insert((import.id, TypeNS));
+            self.r.used_imports.insert(import.id);
         }
         let module = match path_res {
             PathResult::Module(module) => {
@@ -1042,7 +1043,6 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
                                 {
                                     this.record_use(
                                         ident,
-                                        ns,
                                         target_binding,
                                         import.module_path.is_empty(),
                                     );
@@ -1271,7 +1271,7 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
         target: Ident,
     ) {
         // Skip if the import was produced by a macro.
-        if import.parent_scope.expansion != ExpnId::root() {
+        if import.parent_scope.expansion != LocalExpnId::ROOT {
             return;
         }
 

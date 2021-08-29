@@ -23,24 +23,26 @@ use rustc_hir::HirId;
 use rustc_middle::ty::TyCtxt;
 use rustc_span::edition::Edition;
 use rustc_span::Span;
+
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::default::Default;
 use std::fmt::Write;
-use std::ops::Range;
+use std::ops::{ControlFlow, Range};
 use std::str;
 
 use crate::clean::RenderedLink;
 use crate::doctest;
+use crate::html::escape::Escape;
+use crate::html::format::Buffer;
 use crate::html::highlight;
+use crate::html::length_limit::HtmlWithLimit;
 use crate::html::toc::TocBuilder;
 
 use pulldown_cmark::{
     html, BrokenLink, CodeBlockKind, CowStr, Event, LinkType, Options, Parser, Tag,
 };
-
-use super::format::Buffer;
 
 #[cfg(test)]
 mod tests;
@@ -56,7 +58,7 @@ pub(crate) fn opts() -> Options {
 
 /// A subset of [`opts()`] used for rendering summaries.
 pub(crate) fn summary_opts() -> Options {
-    Options::ENABLE_STRIKETHROUGH | Options::ENABLE_SMART_PUNCTUATION
+    Options::ENABLE_STRIKETHROUGH | Options::ENABLE_SMART_PUNCTUATION | Options::ENABLE_TABLES
 }
 
 /// When `to_string` is called, this struct will emit the HTML corresponding to
@@ -207,26 +209,11 @@ impl<'a, I: Iterator<Item = Event<'a>>> Iterator for CodeBlocks<'_, 'a, I> {
         let should_panic;
         let ignore;
         let edition;
-        if let Some(Event::Start(Tag::CodeBlock(kind))) = event {
-            let parse_result = match kind {
-                CodeBlockKind::Fenced(ref lang) => {
-                    LangString::parse_without_check(&lang, self.check_error_codes, false)
-                }
-                CodeBlockKind::Indented => Default::default(),
-            };
-            if !parse_result.rust {
-                return Some(Event::Start(Tag::CodeBlock(kind)));
-            }
-            compile_fail = parse_result.compile_fail;
-            should_panic = parse_result.should_panic;
-            ignore = parse_result.ignore;
-            edition = parse_result.edition;
+        let kind = if let Some(Event::Start(Tag::CodeBlock(kind))) = event {
+            kind
         } else {
             return event;
-        }
-
-        let explicit_edition = edition.is_some();
-        let edition = edition.unwrap_or(self.edition);
+        };
 
         let mut origtext = String::new();
         for event in &mut self.inner {
@@ -240,6 +227,35 @@ impl<'a, I: Iterator<Item = Event<'a>>> Iterator for CodeBlocks<'_, 'a, I> {
         }
         let lines = origtext.lines().filter_map(|l| map_line(l).for_html());
         let text = lines.collect::<Vec<Cow<'_, str>>>().join("\n");
+
+        let parse_result = match kind {
+            CodeBlockKind::Fenced(ref lang) => {
+                let parse_result =
+                    LangString::parse_without_check(&lang, self.check_error_codes, false);
+                if !parse_result.rust {
+                    return Some(Event::Html(
+                        format!(
+                            "<div class=\"example-wrap\">\
+                                 <pre class=\"language-{}\"><code>{}</code></pre>\
+                             </div>",
+                            lang,
+                            Escape(&text),
+                        )
+                        .into(),
+                    ));
+                }
+                parse_result
+            }
+            CodeBlockKind::Indented => Default::default(),
+        };
+
+        compile_fail = parse_result.compile_fail;
+        should_panic = parse_result.should_panic;
+        ignore = parse_result.ignore;
+        edition = parse_result.edition;
+
+        let explicit_edition = edition.is_some();
+        let edition = edition.unwrap_or(self.edition);
 
         let playground_button = self.playground.as_ref().and_then(|playground| {
             let krate = &playground.crate_name;
@@ -315,6 +331,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> Iterator for CodeBlocks<'_, 'a, I> {
             playground_button.as_deref(),
             tooltip,
             edition,
+            None,
             None,
         );
         Some(Event::Html(s.into_inner().into()))
@@ -507,6 +524,10 @@ fn check_if_allowed_tag(t: &Tag<'_>) -> bool {
     )
 }
 
+fn is_forbidden_tag(t: &Tag<'_>) -> bool {
+    matches!(t, Tag::CodeBlock(_) | Tag::Table(_) | Tag::TableHead | Tag::TableRow | Tag::TableCell)
+}
+
 impl<'a, I: Iterator<Item = Event<'a>>> Iterator for SummaryLine<'a, I> {
     type Item = Event<'a>;
 
@@ -520,14 +541,17 @@ impl<'a, I: Iterator<Item = Event<'a>>> Iterator for SummaryLine<'a, I> {
         if let Some(event) = self.inner.next() {
             let mut is_start = true;
             let is_allowed_tag = match event {
-                Event::Start(Tag::CodeBlock(_)) | Event::End(Tag::CodeBlock(_)) => {
-                    return None;
-                }
                 Event::Start(ref c) => {
+                    if is_forbidden_tag(c) {
+                        return None;
+                    }
                     self.depth += 1;
                     check_if_allowed_tag(c)
                 }
                 Event::End(ref c) => {
+                    if is_forbidden_tag(c) {
+                        return None;
+                    }
                     self.depth -= 1;
                     is_start = false;
                     check_if_allowed_tag(c)
@@ -606,8 +630,7 @@ impl<'a, I: Iterator<Item = SpannedEvent<'a>>> Iterator for Footnotes<'a, I> {
                                 is_paragraph = true;
                             }
                             html::push_html(&mut ret, content.into_iter());
-                            write!(ret, "&nbsp;<a href=\"#fnref{}\" rev=\"footnote\">↩</a>", id)
-                                .unwrap();
+                            write!(ret, "&nbsp;<a href=\"#fnref{}\">↩</a>", id).unwrap();
                             if is_paragraph {
                                 ret.push_str("</p>");
                             }
@@ -1060,15 +1083,6 @@ fn markdown_summary_with_limit(
         return (String::new(), false);
     }
 
-    let mut s = String::with_capacity(md.len() * 3 / 2);
-    let mut text_length = 0;
-    let mut stopped_early = false;
-
-    fn push(s: &mut String, text_length: &mut usize, text: &str) {
-        s.push_str(text);
-        *text_length += text.len();
-    }
-
     let mut replacer = |broken_link: BrokenLink<'_>| {
         if let Some(link) =
             link_names.iter().find(|link| &*link.original_text == broken_link.reference)
@@ -1080,56 +1094,48 @@ fn markdown_summary_with_limit(
     };
 
     let p = Parser::new_with_broken_link_callback(md, opts(), Some(&mut replacer));
-    let p = LinkReplacer::new(p, link_names);
+    let mut p = LinkReplacer::new(p, link_names);
 
-    'outer: for event in p {
+    let mut buf = HtmlWithLimit::new(length_limit);
+    let mut stopped_early = false;
+    p.try_for_each(|event| {
         match &event {
             Event::Text(text) => {
-                for word in text.split_inclusive(char::is_whitespace) {
-                    if text_length + word.len() >= length_limit {
-                        stopped_early = true;
-                        break 'outer;
-                    }
-
-                    push(&mut s, &mut text_length, word);
+                let r =
+                    text.split_inclusive(char::is_whitespace).try_for_each(|word| buf.push(word));
+                if r.is_break() {
+                    stopped_early = true;
                 }
+                return r;
             }
             Event::Code(code) => {
-                if text_length + code.len() >= length_limit {
+                buf.open_tag("code");
+                let r = buf.push(code);
+                if r.is_break() {
                     stopped_early = true;
-                    break;
+                } else {
+                    buf.close_tag();
                 }
-
-                s.push_str("<code>");
-                push(&mut s, &mut text_length, code);
-                s.push_str("</code>");
+                return r;
             }
             Event::Start(tag) => match tag {
-                Tag::Emphasis => s.push_str("<em>"),
-                Tag::Strong => s.push_str("<strong>"),
-                Tag::CodeBlock(..) => break,
+                Tag::Emphasis => buf.open_tag("em"),
+                Tag::Strong => buf.open_tag("strong"),
+                Tag::CodeBlock(..) => return ControlFlow::BREAK,
                 _ => {}
             },
             Event::End(tag) => match tag {
-                Tag::Emphasis => s.push_str("</em>"),
-                Tag::Strong => s.push_str("</strong>"),
-                Tag::Paragraph => break,
-                Tag::Heading(..) => break,
+                Tag::Emphasis | Tag::Strong => buf.close_tag(),
+                Tag::Paragraph | Tag::Heading(..) => return ControlFlow::BREAK,
                 _ => {}
             },
-            Event::HardBreak | Event::SoftBreak => {
-                if text_length + 1 >= length_limit {
-                    stopped_early = true;
-                    break;
-                }
-
-                push(&mut s, &mut text_length, " ");
-            }
+            Event::HardBreak | Event::SoftBreak => buf.push(" ")?,
             _ => {}
-        }
-    }
+        };
+        ControlFlow::CONTINUE
+    });
 
-    (s, stopped_early)
+    (buf.finish(), stopped_early)
 }
 
 /// Renders a shortened first paragraph of the given Markdown as a subset of Markdown,
@@ -1358,7 +1364,10 @@ pub struct IdMap {
 
 fn init_id_map() -> FxHashMap<String, usize> {
     let mut map = FxHashMap::default();
-    // This is the list of IDs used by rustdoc templates.
+    // This is the list of IDs used in Javascript.
+    map.insert("help".to_owned(), 1);
+    // This is the list of IDs used in HTML generated in Rust (including the ones
+    // used in tera template files).
     map.insert("mainThemeStyle".to_owned(), 1);
     map.insert("themeStyle".to_owned(), 1);
     map.insert("theme-picker".to_owned(), 1);
@@ -1375,14 +1384,14 @@ fn init_id_map() -> FxHashMap<String, usize> {
     map.insert("rustdoc-vars".to_owned(), 1);
     map.insert("sidebar-vars".to_owned(), 1);
     map.insert("copy-path".to_owned(), 1);
-    map.insert("help".to_owned(), 1);
     map.insert("TOC".to_owned(), 1);
-    map.insert("render-detail".to_owned(), 1);
-    // This is the list of IDs used by rustdoc sections.
+    // This is the list of IDs used by rustdoc sections (but still generated by
+    // rustdoc).
     map.insert("fields".to_owned(), 1);
     map.insert("variants".to_owned(), 1);
     map.insert("implementors-list".to_owned(), 1);
     map.insert("synthetic-implementors-list".to_owned(), 1);
+    map.insert("foreign-impls".to_owned(), 1);
     map.insert("implementations".to_owned(), 1);
     map.insert("trait-implementations".to_owned(), 1);
     map.insert("synthetic-implementations".to_owned(), 1);
@@ -1393,6 +1402,10 @@ fn init_id_map() -> FxHashMap<String, usize> {
     map.insert("provided-methods".to_owned(), 1);
     map.insert("implementors".to_owned(), 1);
     map.insert("synthetic-implementors".to_owned(), 1);
+    map.insert("trait-implementations-list".to_owned(), 1);
+    map.insert("synthetic-implementations-list".to_owned(), 1);
+    map.insert("blanket-implementations-list".to_owned(), 1);
+    map.insert("deref-methods".to_owned(), 1);
     map
 }
 

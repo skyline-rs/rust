@@ -1,4 +1,5 @@
 use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::higher;
 use clippy_utils::{in_macro, SpanlessEq};
 use if_chain::if_chain;
 use rustc_ast::ast::LitKind;
@@ -8,14 +9,13 @@ use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for implicit saturating subtraction.
+    /// ### What it does
+    /// Checks for implicit saturating subtraction.
     ///
-    /// **Why is this bad?** Simplicity and readability. Instead we can easily use an builtin function.
+    /// ### Why is this bad?
+    /// Simplicity and readability. Instead we can easily use an builtin function.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust
     /// let end: u32 = 10;
     /// let start: u32 = 5;
@@ -43,7 +43,7 @@ impl<'tcx> LateLintPass<'tcx> for ImplicitSaturatingSub {
             return;
         }
         if_chain! {
-            if let ExprKind::If(cond, then, None) = &expr.kind;
+            if let Some(higher::If { cond, then, .. }) = higher::If::hir(expr);
 
             // Check if the conditional expression is a binary operation
             if let ExprKind::Binary(ref cond_op, cond_left, cond_right) = cond.kind;

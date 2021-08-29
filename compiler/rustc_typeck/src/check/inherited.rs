@@ -1,19 +1,16 @@
 use super::callee::DeferredCallResolution;
 use super::MaybeInProgressTables;
 
-use rustc_data_structures::fx::FxHashMap;
-use rustc_data_structures::vec_map::VecMap;
 use rustc_hir as hir;
 use rustc_hir::def_id::{DefIdMap, LocalDefId};
 use rustc_hir::HirIdMap;
 use rustc_infer::infer;
 use rustc_infer::infer::{InferCtxt, InferOk, TyCtxtInferExt};
 use rustc_middle::ty::fold::TypeFoldable;
-use rustc_middle::ty::{self, OpaqueTypeKey, Ty, TyCtxt};
+use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_span::{self, Span};
 use rustc_trait_selection::infer::InferCtxtExt as _;
-use rustc_trait_selection::opaque_types::OpaqueTypeDecl;
-use rustc_trait_selection::traits::{self, TraitEngine, TraitEngineExt};
+use rustc_trait_selection::traits::{self, ObligationCause, TraitEngine, TraitEngineExt};
 
 use std::cell::RefCell;
 use std::ops::Deref;
@@ -55,18 +52,8 @@ pub struct Inherited<'a, 'tcx> {
     pub(super) deferred_generator_interiors:
         RefCell<Vec<(hir::BodyId, Ty<'tcx>, hir::GeneratorKind)>>,
 
-    // Opaque types found in explicit return types and their
-    // associated fresh inference variable. Writeback resolves these
-    // variables to get the concrete type, which can be used to
-    // 'de-opaque' OpaqueTypeDecl, after typeck is done with all functions.
-    pub(super) opaque_types: RefCell<VecMap<OpaqueTypeKey<'tcx>, OpaqueTypeDecl<'tcx>>>,
-
-    /// A map from inference variables created from opaque
-    /// type instantiations (`ty::Infer`) to the actual opaque
-    /// type (`ty::Opaque`). Used during fallback to map unconstrained
-    /// opaque type inference variables to their corresponding
-    /// opaque type.
-    pub(super) opaque_types_vars: RefCell<FxHashMap<Ty<'tcx>, Ty<'tcx>>>,
+    /// Reports whether this is in a const context.
+    pub(super) constness: hir::Constness,
 
     pub(super) body_id: Option<hir::BodyId>,
 }
@@ -111,6 +98,16 @@ impl Inherited<'a, 'tcx> {
     pub(super) fn new(infcx: InferCtxt<'a, 'tcx>, def_id: LocalDefId) -> Self {
         let tcx = infcx.tcx;
         let item_id = tcx.hir().local_def_id_to_hir_id(def_id);
+        Self::with_constness(infcx, def_id, tcx.hir().get(item_id).constness_for_typeck())
+    }
+
+    pub(super) fn with_constness(
+        infcx: InferCtxt<'a, 'tcx>,
+        def_id: LocalDefId,
+        constness: hir::Constness,
+    ) -> Self {
+        let tcx = infcx.tcx;
+        let item_id = tcx.hir().local_def_id_to_hir_id(def_id);
         let body_id = tcx.hir().maybe_body_owned_by(item_id);
 
         Inherited {
@@ -124,8 +121,7 @@ impl Inherited<'a, 'tcx> {
             deferred_call_resolutions: RefCell::new(Default::default()),
             deferred_cast_checks: RefCell::new(Vec::new()),
             deferred_generator_interiors: RefCell::new(Vec::new()),
-            opaque_types: RefCell::new(Default::default()),
-            opaque_types_vars: RefCell::new(Default::default()),
+            constness,
             body_id,
         }
     }
@@ -162,7 +158,24 @@ impl Inherited<'a, 'tcx> {
     where
         T: TypeFoldable<'tcx>,
     {
-        let ok = self.partially_normalize_associated_types_in(span, body_id, param_env, value);
+        self.normalize_associated_types_in_with_cause(
+            ObligationCause::misc(span, body_id),
+            param_env,
+            value,
+        )
+    }
+
+    pub(super) fn normalize_associated_types_in_with_cause<T>(
+        &self,
+        cause: ObligationCause<'tcx>,
+        param_env: ty::ParamEnv<'tcx>,
+        value: T,
+    ) -> T
+    where
+        T: TypeFoldable<'tcx>,
+    {
+        let ok = self.partially_normalize_associated_types_in(cause, param_env, value);
+        debug!(?ok);
         self.register_infer_ok_obligations(ok)
     }
 }

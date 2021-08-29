@@ -9,13 +9,15 @@
 
 use Destination::*;
 
-use rustc_lint_defs::FutureBreakage;
 use rustc_span::source_map::SourceMap;
 use rustc_span::{MultiSpan, SourceFile, Span};
 
 use crate::snippet::{Annotation, AnnotationType, Line, MultilineAnnotation, Style, StyledString};
 use crate::styled_buffer::StyledBuffer;
-use crate::{CodeSuggestion, Diagnostic, DiagnosticId, Level, SubDiagnostic, SuggestionStyle};
+use crate::{
+    CodeSuggestion, Diagnostic, DiagnosticId, Level, SubDiagnostic, SubstitutionHighlight,
+    SuggestionStyle,
+};
 
 use rustc_lint_defs::pluralize;
 
@@ -193,7 +195,7 @@ pub trait Emitter {
     /// other formats can, and will, simply ignore it.
     fn emit_artifact_notification(&mut self, _path: &Path, _artifact_type: &str) {}
 
-    fn emit_future_breakage_report(&mut self, _diags: Vec<(FutureBreakage, Diagnostic)>) {}
+    fn emit_future_breakage_report(&mut self, _diags: Vec<Diagnostic>) {}
 
     /// Emit list of unused externs
     fn emit_unused_externs(&mut self, _lint_level: &str, _unused_externs: &[&str]) {}
@@ -309,9 +311,7 @@ pub trait Emitter {
                     // are some which do actually involve macros.
                     ExpnKind::Inlined | ExpnKind::Desugaring(..) | ExpnKind::AstPass(..) => None,
 
-                    ExpnKind::Macro { kind: macro_kind, name, proc_macro: _ } => {
-                        Some((macro_kind, name))
-                    }
+                    ExpnKind::Macro(macro_kind, name) => Some((macro_kind, name)),
                 }
             });
 
@@ -368,23 +368,11 @@ pub trait Emitter {
                     continue;
                 }
 
-                if matches!(trace.kind, ExpnKind::Inlined) {
-                    new_labels
-                        .push((trace.call_site, "in the inlined copy of this code".to_string()));
-                } else if always_backtrace {
-                    let proc_macro = if let ExpnKind::Macro { kind: _, name: _, proc_macro: true } =
-                        trace.kind
-                    {
-                        "procedural macro "
-                    } else {
-                        ""
-                    };
-
+                if always_backtrace && !matches!(trace.kind, ExpnKind::Inlined) {
                     new_labels.push((
                         trace.def_site,
                         format!(
-                            "in this expansion of {}`{}`{}",
-                            proc_macro,
+                            "in this expansion of `{}`{}",
                             trace.kind.descr(),
                             if macro_backtrace.len() > 1 {
                                 // if macro_backtrace.len() == 1 it'll be
@@ -410,17 +398,27 @@ pub trait Emitter {
                 // and it needs an "in this macro invocation" label to match that.
                 let redundant_span = trace.call_site.contains(sp);
 
-                if !redundant_span
-                    && matches!(
-                        trace.kind,
-                        ExpnKind::Macro { kind: MacroKind::Bang, name: _, proc_macro: _ }
-                    )
-                    || always_backtrace
-                {
+                if !redundant_span || always_backtrace {
+                    let msg: Cow<'static, _> = match trace.kind {
+                        ExpnKind::Macro(MacroKind::Attr, _) => {
+                            "this procedural macro expansion".into()
+                        }
+                        ExpnKind::Macro(MacroKind::Derive, _) => {
+                            "this derive macro expansion".into()
+                        }
+                        ExpnKind::Macro(MacroKind::Bang, _) => "this macro invocation".into(),
+                        ExpnKind::Inlined => "the inlined copy of this code".into(),
+                        ExpnKind::Root => "in the crate root".into(),
+                        ExpnKind::AstPass(kind) => kind.descr().into(),
+                        ExpnKind::Desugaring(kind) => {
+                            format!("this {} desugaring", kind.descr()).into()
+                        }
+                    };
                     new_labels.push((
                         trace.call_site,
                         format!(
-                            "in this macro invocation{}",
+                            "in {}{}",
+                            msg,
                             if macro_backtrace.len() > 1 && always_backtrace {
                                 // only specify order when the macro
                                 // backtrace is multiple levels deep
@@ -959,7 +957,6 @@ impl EmitterWriter {
         //   |
         for pos in 0..=line_len {
             draw_col_separator(buffer, line_offset + pos + 1, width_offset - 2);
-            buffer.putc(line_offset + pos + 1, width_offset - 2, '|', Style::LineNumber);
         }
 
         // Write the horizontal lines for multiline annotations
@@ -1349,7 +1346,11 @@ impl EmitterWriter {
                 let buffer_msg_line_offset = buffer.num_lines();
 
                 // Add spacing line
-                draw_col_separator(&mut buffer, buffer_msg_line_offset, max_line_num_len + 1);
+                draw_col_separator_no_space(
+                    &mut buffer,
+                    buffer_msg_line_offset,
+                    max_line_num_len + 1,
+                );
 
                 // Then, the secondary file indicator
                 buffer.prepend(buffer_msg_line_offset + 1, "::: ", Style::LineNumber);
@@ -1592,8 +1593,11 @@ impl EmitterWriter {
         );
 
         let mut row_num = 2;
+        draw_col_separator_no_space(&mut buffer, 1, max_line_num_len + 1);
         let mut notice_capitalization = false;
-        for (complete, parts, only_capitalization) in suggestions.iter().take(MAX_SUGGESTIONS) {
+        for (complete, parts, highlights, only_capitalization) in
+            suggestions.iter().take(MAX_SUGGESTIONS)
+        {
             notice_capitalization |= only_capitalization;
             // Only show underline if the suggestion spans a single line and doesn't cover the
             // entirety of the code output. If you have multiple replacements in the same line
@@ -1601,16 +1605,26 @@ impl EmitterWriter {
             let show_underline = !(parts.len() == 1 && parts[0].snippet.trim() == complete.trim())
                 && complete.lines().count() == 1;
 
-            let lines = sm
+            let has_deletion = parts.iter().any(|p| p.is_deletion());
+            let is_multiline = complete.lines().count() > 1;
+
+            let show_diff = has_deletion && !is_multiline;
+
+            if show_diff {
+                row_num += 1;
+            }
+
+            let file_lines = sm
                 .span_to_lines(parts[0].span)
                 .expect("span_to_lines failed when emitting suggestion");
 
-            assert!(!lines.lines.is_empty() || parts[0].span.is_dummy());
+            assert!(!file_lines.lines.is_empty() || parts[0].span.is_dummy());
 
             let line_start = sm.lookup_char_pos(parts[0].span.lo()).line;
             draw_col_separator_no_space(&mut buffer, 1, max_line_num_len + 1);
             let mut lines = complete.lines();
-            for (line_pos, line) in lines.by_ref().take(MAX_SUGGESTION_HIGHLIGHT_LINES).enumerate()
+            for (line_pos, (line, highlight_parts)) in
+                lines.by_ref().zip(highlights).take(MAX_SUGGESTION_HIGHLIGHT_LINES).enumerate()
             {
                 // Print the span column to avoid confusion
                 buffer.puts(
@@ -1619,9 +1633,68 @@ impl EmitterWriter {
                     &self.maybe_anonymized(line_start + line_pos),
                     Style::LineNumber,
                 );
+                if show_diff {
+                    // Add the line number for both addition and removal to drive the point home.
+                    //
+                    // N - fn foo<A: T>(bar: A) {
+                    // N + fn foo(bar: impl T) {
+                    buffer.puts(
+                        row_num - 1,
+                        0,
+                        &self.maybe_anonymized(line_start + line_pos),
+                        Style::LineNumber,
+                    );
+                    buffer.puts(row_num - 1, max_line_num_len + 1, "- ", Style::Removal);
+                    buffer.puts(
+                        row_num - 1,
+                        max_line_num_len + 3,
+                        &replace_tabs(
+                            &*file_lines
+                                .file
+                                .get_line(file_lines.lines[line_pos].line_index)
+                                .unwrap(),
+                        ),
+                        Style::NoStyle,
+                    );
+                    buffer.puts(row_num, max_line_num_len + 1, "+ ", Style::Addition);
+                } else if is_multiline {
+                    match &highlight_parts[..] {
+                        [SubstitutionHighlight { start: 0, end }] if *end == line.len() => {
+                            buffer.puts(row_num, max_line_num_len + 1, "+ ", Style::Addition);
+                        }
+                        [] => {
+                            draw_col_separator(&mut buffer, row_num, max_line_num_len + 1);
+                        }
+                        _ => {
+                            buffer.puts(row_num, max_line_num_len + 1, "~ ", Style::Addition);
+                        }
+                    }
+                } else {
+                    draw_col_separator(&mut buffer, row_num, max_line_num_len + 1);
+                }
+
                 // print the suggestion
-                draw_col_separator(&mut buffer, row_num, max_line_num_len + 1);
                 buffer.append(row_num, &replace_tabs(line), Style::NoStyle);
+
+                // Colorize addition/replacements with green.
+                for &SubstitutionHighlight { start, end } in highlight_parts {
+                    // Account for tabs when highlighting (#87972).
+                    let tabs: usize = line
+                        .chars()
+                        .take(start)
+                        .map(|ch| match ch {
+                            '\t' => 3,
+                            _ => 0,
+                        })
+                        .sum();
+                    buffer.set_style_range(
+                        row_num,
+                        max_line_num_len + 3 + start + tabs,
+                        max_line_num_len + 3 + end + tabs,
+                        Style::Addition,
+                        true,
+                    );
+                }
                 row_num += 1;
             }
 
@@ -1656,24 +1729,28 @@ impl EmitterWriter {
                     let underline_start = (span_start_pos + start) as isize + offset;
                     let underline_end = (span_start_pos + start + sub_len) as isize + offset;
                     assert!(underline_start >= 0 && underline_end >= 0);
+                    let padding: usize = max_line_num_len + 3;
                     for p in underline_start..underline_end {
-                        buffer.putc(
-                            row_num,
-                            ((max_line_num_len + 3) as isize + p) as usize,
-                            '^',
-                            Style::UnderlinePrimary,
-                        );
-                    }
-                    // underline removals too
-                    if underline_start == underline_end {
-                        for p in underline_start - 1..underline_start + 1 {
+                        if !show_diff {
+                            // If this is a replacement, underline with `^`, if this is an addition
+                            // underline with `+`.
                             buffer.putc(
                                 row_num,
-                                ((max_line_num_len + 3) as isize + p) as usize,
-                                '-',
-                                Style::UnderlineSecondary,
+                                (padding as isize + p) as usize,
+                                if part.is_addition(&sm) { '+' } else { '~' },
+                                Style::Addition,
                             );
                         }
+                    }
+                    if show_diff {
+                        // Colorize removal with red in diff format.
+                        buffer.set_style_range(
+                            row_num - 2,
+                            (padding as isize + span_start_pos as isize) as usize,
+                            (padding as isize + span_end_pos as isize) as usize,
+                            Style::Removal,
+                            true,
+                        );
                     }
 
                     // length of the code after substitution
@@ -2131,6 +2208,12 @@ impl<'a> WritableDst<'a> {
     fn apply_style(&mut self, lvl: Level, style: Style) -> io::Result<()> {
         let mut spec = ColorSpec::new();
         match style {
+            Style::Addition => {
+                spec.set_fg(Some(Color::Green)).set_intense(true);
+            }
+            Style::Removal => {
+                spec.set_fg(Some(Color::Red)).set_intense(true);
+            }
             Style::LineAndColumn => {}
             Style::LineNumber => {
                 spec.set_bold(true);

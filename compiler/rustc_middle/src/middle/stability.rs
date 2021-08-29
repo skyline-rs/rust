@@ -11,7 +11,7 @@ use rustc_errors::{Applicability, DiagnosticBuilder};
 use rustc_feature::GateIssue;
 use rustc_hir as hir;
 use rustc_hir::def::DefKind;
-use rustc_hir::def_id::{CrateNum, DefId, CRATE_DEF_INDEX};
+use rustc_hir::def_id::{CrateNum, DefId, LocalDefId, CRATE_DEF_INDEX};
 use rustc_hir::{self, HirId};
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_session::lint::builtin::{DEPRECATED, DEPRECATED_IN_FUTURE, SOFT_UNSTABLE};
@@ -36,12 +36,12 @@ pub struct DeprecationEntry {
     pub attr: Deprecation,
     /// The `DefId` where the attr was originally attached. `None` for non-local
     /// `DefId`'s.
-    origin: Option<HirId>,
+    origin: Option<LocalDefId>,
 }
 
 impl DeprecationEntry {
-    pub fn local(attr: Deprecation, id: HirId) -> DeprecationEntry {
-        DeprecationEntry { attr, origin: Some(id) }
+    pub fn local(attr: Deprecation, def_id: LocalDefId) -> DeprecationEntry {
+        DeprecationEntry { attr, origin: Some(def_id) }
     }
 
     pub fn external(attr: Deprecation) -> DeprecationEntry {
@@ -61,9 +61,9 @@ impl DeprecationEntry {
 pub struct Index<'tcx> {
     /// This is mostly a cache, except the stabilities of local items
     /// are filled by the annotator.
-    pub stab_map: FxHashMap<HirId, &'tcx Stability>,
-    pub const_stab_map: FxHashMap<HirId, &'tcx ConstStability>,
-    pub depr_map: FxHashMap<HirId, DeprecationEntry>,
+    pub stab_map: FxHashMap<LocalDefId, &'tcx Stability>,
+    pub const_stab_map: FxHashMap<LocalDefId, &'tcx ConstStability>,
+    pub depr_map: FxHashMap<LocalDefId, DeprecationEntry>,
 
     /// Maps for each crate whether it is part of the staged API.
     pub staged_api: FxHashMap<CrateNum, bool>,
@@ -73,16 +73,16 @@ pub struct Index<'tcx> {
 }
 
 impl<'tcx> Index<'tcx> {
-    pub fn local_stability(&self, id: HirId) -> Option<&'tcx Stability> {
-        self.stab_map.get(&id).cloned()
+    pub fn local_stability(&self, def_id: LocalDefId) -> Option<&'tcx Stability> {
+        self.stab_map.get(&def_id).copied()
     }
 
-    pub fn local_const_stability(&self, id: HirId) -> Option<&'tcx ConstStability> {
-        self.const_stab_map.get(&id).cloned()
+    pub fn local_const_stability(&self, def_id: LocalDefId) -> Option<&'tcx ConstStability> {
+        self.const_stab_map.get(&def_id).copied()
     }
 
-    pub fn local_deprecation_entry(&self, id: HirId) -> Option<DeprecationEntry> {
-        self.depr_map.get(&id).cloned()
+    pub fn local_deprecation_entry(&self, def_id: LocalDefId) -> Option<DeprecationEntry> {
+        self.depr_map.get(&def_id).cloned()
     }
 }
 
@@ -226,18 +226,19 @@ fn late_report_deprecation(
     suggestion: Option<Symbol>,
     lint: &'static Lint,
     span: Span,
+    method_span: Option<Span>,
     hir_id: HirId,
     def_id: DefId,
 ) {
     if span.in_derive_expansion() {
         return;
     }
-
-    tcx.struct_span_lint_hir(lint, hir_id, span, |lint| {
+    let method_span = method_span.unwrap_or(span);
+    tcx.struct_span_lint_hir(lint, hir_id, method_span, |lint| {
         let mut diag = lint.build(message);
         if let hir::Node::Expr(_) = tcx.hir().get(hir_id) {
             let kind = tcx.def_kind(def_id).descr(def_id);
-            deprecation_suggestion(&mut diag, kind, suggestion, span);
+            deprecation_suggestion(&mut diag, kind, suggestion, method_span);
         }
         diag.emit()
     });
@@ -306,13 +307,13 @@ impl<'tcx> TyCtxt<'tcx> {
                     let path = &with_no_trimmed_paths(|| self.def_path_str(def_id));
                     let kind = self.def_kind(def_id).descr(def_id);
                     let (message, lint) = deprecation_message(&depr_entry.attr, kind, path);
-                    let span = method_span.unwrap_or(span);
                     late_report_deprecation(
                         self,
                         &message,
                         depr_entry.attr.suggestion,
                         lint,
                         span,
+                        method_span,
                         id,
                         def_id,
                     );

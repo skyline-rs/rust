@@ -15,7 +15,7 @@ use rustc_middle::hir::place::Place as HirPlace;
 use rustc_middle::mir::FakeReadCause;
 use rustc_middle::ty::adjustment::{Adjust, Adjustment, PointerCast};
 use rustc_middle::ty::fold::{TypeFoldable, TypeFolder};
-use rustc_middle::ty::{self, Ty, TyCtxt};
+use rustc_middle::ty::{self, ClosureSizeProfileData, Ty, TyCtxt};
 use rustc_span::symbol::sym;
 use rustc_span::Span;
 use rustc_trait_selection::opaque_types::InferCtxtExt;
@@ -60,6 +60,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         }
         wbcx.visit_body(body);
         wbcx.visit_min_capture_map();
+        wbcx.eval_closure_size();
         wbcx.visit_fake_reads_map();
         wbcx.visit_closures();
         wbcx.visit_liberated_fn_sigs();
@@ -129,7 +130,7 @@ impl<'cx, 'tcx> WritebackCx<'cx, 'tcx> {
 
     fn write_ty_to_typeck_results(&mut self, hir_id: hir::HirId, ty: Ty<'tcx>) {
         debug!("write_ty_to_typeck_results({:?}, {:?})", hir_id, ty);
-        assert!(!ty.needs_infer() && !ty.has_placeholders() && !ty.has_free_regions());
+        assert!(!ty.needs_infer() && !ty.has_placeholders() && !ty.has_free_regions(self.tcx()));
         self.typeck_results.node_types_mut().insert(hir_id, ty);
     }
 
@@ -174,10 +175,10 @@ impl<'cx, 'tcx> WritebackCx<'cx, 'tcx> {
                                 }
                             }
                         }
-                        hir::ExprKind::AssignOp(..) => {
-                            if let Some(a) = typeck_results.adjustments_mut().get_mut(lhs.hir_id) {
-                                a.pop();
-                            }
+                        hir::ExprKind::AssignOp(..)
+                            if let Some(a) = typeck_results.adjustments_mut().get_mut(lhs.hir_id) =>
+                        {
+                            a.pop();
                         }
                         _ => {}
                     }
@@ -330,9 +331,31 @@ impl<'cx, 'tcx> Visitor<'tcx> for WritebackCx<'cx, 'tcx> {
         let ty = self.resolve(ty, &hir_ty.span);
         self.write_ty_to_typeck_results(hir_ty.hir_id, ty);
     }
+
+    fn visit_infer(&mut self, inf: &'tcx hir::InferArg) {
+        intravisit::walk_inf(self, inf);
+        // Ignore cases where the inference is a const.
+        if let Some(ty) = self.fcx.node_ty_opt(inf.hir_id) {
+            let ty = self.resolve(ty, &inf.span);
+            self.write_ty_to_typeck_results(inf.hir_id, ty);
+        }
+    }
 }
 
 impl<'cx, 'tcx> WritebackCx<'cx, 'tcx> {
+    fn eval_closure_size(&mut self) {
+        let mut res: FxHashMap<DefId, ClosureSizeProfileData<'tcx>> = Default::default();
+        for (closure_def_id, data) in self.fcx.typeck_results.borrow().closure_size_eval.iter() {
+            let closure_hir_id =
+                self.tcx().hir().local_def_id_to_hir_id(closure_def_id.expect_local());
+
+            let data = self.resolve(*data, &closure_hir_id);
+
+            res.insert(*closure_def_id, data);
+        }
+
+        self.typeck_results.closure_size_eval = res;
+    }
     fn visit_min_capture_map(&mut self) {
         let mut min_captures_wb = ty::MinCaptureInformationMap::with_capacity_and_hasher(
             self.fcx.typeck_results.borrow().closure_min_captures.len(),
@@ -475,12 +498,15 @@ impl<'cx, 'tcx> WritebackCx<'cx, 'tcx> {
     }
 
     fn visit_opaque_types(&mut self, span: Span) {
-        for &(opaque_type_key, opaque_defn) in self.fcx.opaque_types.borrow().iter() {
+        let opaque_types = self.fcx.infcx.inner.borrow().opaque_types.clone();
+        for (opaque_type_key, opaque_defn) in opaque_types {
             let hir_id =
                 self.tcx().hir().local_def_id_to_hir_id(opaque_type_key.def_id.expect_local());
             let instantiated_ty = self.resolve(opaque_defn.concrete_ty, &hir_id);
 
             debug_assert!(!instantiated_ty.has_escaping_bound_vars());
+
+            let opaque_type_key = self.fcx.fully_resolve(opaque_type_key).unwrap();
 
             // Prevent:
             // * `fn foo<T>() -> Foo<T>`
@@ -494,6 +520,8 @@ impl<'cx, 'tcx> WritebackCx<'cx, 'tcx> {
             // fn foo<U>() -> Foo<U> { .. }
             // ```
             // figures out the concrete type with `U`, but the stored type is with `T`.
+
+            // FIXME: why are we calling this here? This seems too early, and duplicated.
             let definition_ty = self.fcx.infer_opaque_definition_from_instantiation(
                 opaque_type_key,
                 instantiated_ty,
@@ -503,8 +531,7 @@ impl<'cx, 'tcx> WritebackCx<'cx, 'tcx> {
             let mut skip_add = false;
 
             if let ty::Opaque(definition_ty_def_id, _substs) = *definition_ty.kind() {
-                if let hir::OpaqueTyOrigin::Misc | hir::OpaqueTyOrigin::TyAlias = opaque_defn.origin
-                {
+                if opaque_defn.origin == hir::OpaqueTyOrigin::TyAlias {
                     if opaque_type_key.def_id == definition_ty_def_id {
                         debug!(
                             "skipping adding concrete definition for opaque type {:?} {:?}",
@@ -515,33 +542,17 @@ impl<'cx, 'tcx> WritebackCx<'cx, 'tcx> {
                 }
             }
 
-            if !opaque_type_key.substs.needs_infer() {
-                // We only want to add an entry into `concrete_opaque_types`
-                // if we actually found a defining usage of this opaque type.
-                // Otherwise, we do nothing - we'll either find a defining usage
-                // in some other location, or we'll end up emitting an error due
-                // to the lack of defining usage
-                if !skip_add {
-                    let old_concrete_ty = self
-                        .typeck_results
-                        .concrete_opaque_types
-                        .insert(opaque_type_key, definition_ty);
-                    if let Some(old_concrete_ty) = old_concrete_ty {
-                        if old_concrete_ty != definition_ty {
-                            span_bug!(
-                                span,
-                                "`visit_opaque_types` tried to write different types for the same \
-                                 opaque type: {:?}, {:?}, {:?}, {:?}",
-                                opaque_type_key.def_id,
-                                definition_ty,
-                                opaque_defn,
-                                old_concrete_ty,
-                            );
-                        }
-                    }
-                }
-            } else {
-                self.tcx().sess.delay_span_bug(span, "`opaque_defn` has inference variables");
+            if opaque_type_key.substs.needs_infer() {
+                span_bug!(span, "{:#?} has inference variables", opaque_type_key.substs)
+            }
+
+            // We only want to add an entry into `concrete_opaque_types`
+            // if we actually found a defining usage of this opaque type.
+            // Otherwise, we do nothing - we'll either find a defining usage
+            // in some other location, or we'll end up emitting an error due
+            // to the lack of defining usage
+            if !skip_add {
+                self.typeck_results.concrete_opaque_types.insert(opaque_type_key.def_id);
             }
         }
     }

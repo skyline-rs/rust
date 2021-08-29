@@ -91,6 +91,7 @@
 #![feature(never_type)]
 #![feature(nll)]
 #![feature(in_band_lifetimes)]
+#![feature(iter_zip)]
 #![recursion_limit = "256"]
 
 #[macro_use]
@@ -164,13 +165,9 @@ fn compute_symbol_name(
 
     // FIXME(eddyb) Precompute a custom symbol name based on attributes.
     let is_foreign = if let Some(def_id) = def_id.as_local() {
-        if tcx.plugin_registrar_fn(()) == Some(def_id) {
-            let disambiguator = tcx.sess.local_crate_disambiguator();
-            return tcx.sess.generate_plugin_registrar_symbol(disambiguator);
-        }
         if tcx.proc_macro_decls_static(()) == Some(def_id) {
-            let disambiguator = tcx.sess.local_crate_disambiguator();
-            return tcx.sess.generate_proc_macro_decls_symbol(disambiguator);
+            let stable_crate_id = tcx.sess.local_stable_crate_id();
+            return tcx.sess.generate_proc_macro_decls_symbol(stable_crate_id);
         }
         let hir_id = tcx.hir().local_def_id_to_hir_id(def_id);
         matches!(tcx.hir().get(hir_id), Node::ForeignItem(_))
@@ -249,10 +246,18 @@ fn compute_symbol_name(
         tcx.symbol_mangling_version(mangling_version_crate)
     };
 
-    match mangling_version {
+    let symbol = match mangling_version {
         SymbolManglingVersion::Legacy => legacy::mangle(tcx, instance, instantiating_crate),
         SymbolManglingVersion::V0 => v0::mangle(tcx, instance, instantiating_crate),
-    }
+    };
+
+    debug_assert!(
+        rustc_demangle::try_demangle(&symbol).is_ok(),
+        "compute_symbol_name: `{}` cannot be demangled",
+        symbol
+    );
+
+    symbol
 }
 
 fn is_generic(substs: SubstsRef<'_>) -> bool {

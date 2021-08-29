@@ -7,7 +7,7 @@ use crate::ty::layout::IntegerExt;
 use crate::ty::query::TyCtxtAt;
 use crate::ty::subst::{GenericArgKind, Subst, SubstsRef};
 use crate::ty::TyKind::*;
-use crate::ty::{self, DefIdTree, List, Ty, TyCtxt, TypeFoldable};
+use crate::ty::{self, DebruijnIndex, DefIdTree, List, Ty, TyCtxt, TypeFoldable};
 use rustc_apfloat::Float as _;
 use rustc_ast as ast;
 use rustc_attr::{self as attr, SignedInt, UnsignedInt};
@@ -206,8 +206,9 @@ impl<'tcx> TyCtxt<'tcx> {
         mut ty: Ty<'tcx>,
         normalize: impl Fn(Ty<'tcx>) -> Ty<'tcx>,
     ) -> Ty<'tcx> {
+        let recursion_limit = self.recursion_limit();
         for iteration in 0.. {
-            if !self.sess.recursion_limit().value_within_limit(iteration) {
+            if !recursion_limit.value_within_limit(iteration) {
                 return self.ty_error_with_message(
                     DUMMY_SP,
                     &format!("reached the recursion limit finding the struct tail for {}", ty),
@@ -224,13 +225,11 @@ impl<'tcx> TyCtxt<'tcx> {
                     }
                 }
 
-                ty::Tuple(tys) => {
-                    if let Some((&last_ty, _)) = tys.split_last() {
-                        ty = last_ty.expect_ty();
-                    } else {
-                        break;
-                    }
+                ty::Tuple(tys) if let Some((&last_ty, _)) = tys.split_last() => {
+                    ty = last_ty.expect_ty();
                 }
+
+                ty::Tuple(_) => break,
 
                 ty::Projection(_) | ty::Opaque(..) => {
                     let normalized = normalize(ty);
@@ -539,6 +538,7 @@ impl<'tcx> TyCtxt<'tcx> {
             expanded_cache: FxHashMap::default(),
             primary_def_id: Some(def_id),
             found_recursion: false,
+            found_any_recursion: false,
             check_recursion: true,
             tcx: self,
         };
@@ -559,6 +559,7 @@ struct OpaqueTypeExpander<'tcx> {
     expanded_cache: FxHashMap<(DefId, SubstsRef<'tcx>), Ty<'tcx>>,
     primary_def_id: Option<DefId>,
     found_recursion: bool,
+    found_any_recursion: bool,
     /// Whether or not to check for recursive opaque types.
     /// This is `true` when we're explicitly checking for opaque type
     /// recursion, and 'false' otherwise to avoid unnecessary work.
@@ -568,7 +569,7 @@ struct OpaqueTypeExpander<'tcx> {
 
 impl<'tcx> OpaqueTypeExpander<'tcx> {
     fn expand_opaque_ty(&mut self, def_id: DefId, substs: SubstsRef<'tcx>) -> Option<Ty<'tcx>> {
-        if self.found_recursion {
+        if self.found_any_recursion {
             return None;
         }
         let substs = substs.fold_with(self);
@@ -590,6 +591,7 @@ impl<'tcx> OpaqueTypeExpander<'tcx> {
         } else {
             // If another opaque type that we contain is recursive, then it
             // will report the error, so we don't have to.
+            self.found_any_recursion = true;
             self.found_recursion = def_id == *self.primary_def_id.as_ref().unwrap();
             None
         }
@@ -677,7 +679,7 @@ impl<'tcx> ty::TyS<'tcx> {
     }
 
     /// Checks whether values of this type `T` implement the `Freeze`
-    /// trait -- frozen types are those that do not contain a
+    /// trait -- frozen types are those that do not contain an
     /// `UnsafeCell` anywhere. This is a language concept used to
     /// distinguish "true immutability", which is relevant to
     /// optimization as well as the rules around static values. Note
@@ -816,6 +818,15 @@ impl<'tcx> ty::TyS<'tcx> {
                     [component_ty] => component_ty,
                     _ => self,
                 };
+
+                // FIXME(#86868): We should be canonicalizing, or else moving this to a method of inference
+                // context, or *something* like that, but for now just avoid passing inference
+                // variables to queries that can't cope with them. Instead, conservatively
+                // return "true" (may change drop order).
+                if query_ty.needs_infer() {
+                    return true;
+                }
+
                 // This doesn't depend on regions, so try to minimize distinct
                 // query keys used.
                 let erased = tcx.normalize_erasing_regions(param_env, query_ty);
@@ -904,6 +915,10 @@ impl<'tcx> ty::TyS<'tcx> {
             ty = inner_ty;
         }
         ty
+    }
+
+    pub fn outer_exclusive_binder(&'tcx self) -> DebruijnIndex {
+        self.outer_exclusive_binder
     }
 }
 
@@ -1064,6 +1079,7 @@ pub fn normalize_opaque_types(
         expanded_cache: FxHashMap::default(),
         primary_def_id: None,
         found_recursion: false,
+        found_any_recursion: false,
         check_recursion: false,
         tcx,
     };

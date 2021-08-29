@@ -179,10 +179,10 @@ fn return_macro_parse_failure_fallback(
         .lines()
         .last()
         .map(|closing_line| {
-            closing_line.trim().chars().all(|ch| match ch {
-                '}' | ')' | ']' => true,
-                _ => false,
-            })
+            closing_line
+                .trim()
+                .chars()
+                .all(|ch| matches!(ch, '}' | ')' | ']'))
         })
         .unwrap_or(false);
     if is_like_block_indent_style {
@@ -401,7 +401,7 @@ fn rewrite_macro_inner(
                 handle_vec_semi(context, shape, arg_vec, macro_name, style)
             } else {
                 // If we are rewriting `vec!` macro or other special macros,
-                // then we can rewrite this as an usual array literal.
+                // then we can rewrite this as a usual array literal.
                 // Otherwise, we must preserve the original existence of trailing comma.
                 let macro_name = &macro_name.as_str();
                 let mut force_trailing_comma = if trailing_comma {
@@ -690,25 +690,22 @@ fn delim_token_to_str(
 
 impl MacroArgKind {
     fn starts_with_brace(&self) -> bool {
-        match *self {
+        matches!(
+            *self,
             MacroArgKind::Repeat(DelimToken::Brace, _, _, _)
-            | MacroArgKind::Delimited(DelimToken::Brace, _) => true,
-            _ => false,
-        }
+                | MacroArgKind::Delimited(DelimToken::Brace, _)
+        )
     }
 
     fn starts_with_dollar(&self) -> bool {
-        match *self {
-            MacroArgKind::Repeat(..) | MacroArgKind::MetaVariable(..) => true,
-            _ => false,
-        }
+        matches!(
+            *self,
+            MacroArgKind::Repeat(..) | MacroArgKind::MetaVariable(..)
+        )
     }
 
     fn ends_with_space(&self) -> bool {
-        match *self {
-            MacroArgKind::Separator(..) => true,
-            _ => false,
-        }
+        matches!(*self, MacroArgKind::Separator(..))
     }
 
     fn has_meta_var(&self) -> bool {
@@ -1162,10 +1159,10 @@ fn force_space_before(tok: &TokenKind) -> bool {
 }
 
 fn ident_like(tok: &Token) -> bool {
-    match tok.kind {
-        TokenKind::Ident(..) | TokenKind::Literal(..) | TokenKind::Lifetime(_) => true,
-        _ => false,
-    }
+    matches!(
+        tok.kind,
+        TokenKind::Ident(..) | TokenKind::Literal(..) | TokenKind::Lifetime(_)
+    )
 }
 
 fn next_space(tok: &TokenKind) -> SpaceState {
@@ -1399,7 +1396,7 @@ impl MacroBranch {
         // Undo our replacement of macro variables.
         // FIXME: this could be *much* more efficient.
         for (old, new) in &substs {
-            if old_body.find(new).is_some() {
+            if old_body.contains(new) {
                 debug!("rewrite_macro_def: bailing matching variable: `{}`", new);
                 return None;
             }
@@ -1420,7 +1417,7 @@ impl MacroBranch {
     }
 }
 
-/// Format `lazy_static!` from https://crates.io/crates/lazy_static.
+/// Format `lazy_static!` from <https://crates.io/crates/lazy_static>.
 ///
 /// # Expected syntax
 ///

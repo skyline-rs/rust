@@ -3,7 +3,7 @@
 //! [rustc dev guide]: https://rustc-dev-guide.rust-lang.org/mir/index.html
 
 use crate::mir::coverage::{CodeRegion, CoverageKind};
-use crate::mir::interpret::{Allocation, GlobalAlloc, Scalar};
+use crate::mir::interpret::{Allocation, ConstValue, GlobalAlloc, Scalar};
 use crate::mir::visit::MirVisitable;
 use crate::ty::adjustment::PointerCast;
 use crate::ty::codec::{TyDecoder, TyEncoder};
@@ -242,6 +242,7 @@ pub struct Body<'tcx> {
 
 impl<'tcx> Body<'tcx> {
     pub fn new(
+        tcx: TyCtxt<'tcx>,
         source: MirSource<'tcx>,
         basic_blocks: IndexVec<BasicBlock, BasicBlockData<'tcx>>,
         source_scopes: IndexVec<SourceScope, SourceScopeData<'tcx>>,
@@ -284,7 +285,7 @@ impl<'tcx> Body<'tcx> {
             predecessor_cache: PredecessorCache::new(),
             is_cyclic: GraphIsCyclicCache::new(),
         };
-        body.is_polymorphic = body.has_param_types_or_consts();
+        body.is_polymorphic = body.definitely_has_param_types_or_consts(tcx);
         body
     }
 
@@ -294,7 +295,7 @@ impl<'tcx> Body<'tcx> {
     /// is only useful for testing but cannot be `#[cfg(test)]` because it is used in a different
     /// crate.
     pub fn new_cfg_only(basic_blocks: IndexVec<BasicBlock, BasicBlockData<'tcx>>) -> Self {
-        let mut body = Body {
+        Body {
             phase: MirPhase::Build,
             source: MirSource::item(DefId::local(CRATE_DEF_INDEX)),
             basic_blocks,
@@ -310,9 +311,7 @@ impl<'tcx> Body<'tcx> {
             is_polymorphic: false,
             predecessor_cache: PredecessorCache::new(),
             is_cyclic: GraphIsCyclicCache::new(),
-        };
-        body.is_polymorphic = body.has_param_types_or_consts();
-        body
+        }
     }
 
     #[inline]
@@ -651,7 +650,7 @@ pub enum BorrowKind {
     /// in an aliasable location. To solve, you'd have to translate with
     /// an `&mut` borrow:
     ///
-    ///     struct Env { x: & &mut isize }
+    ///     struct Env { x: &mut &mut isize }
     ///     let x: &mut isize = ...;
     ///     let y = (&mut Env { &mut x }, fn_ptr); // changed from &x to &mut x
     ///     fn fn_ptr(env: &mut Env) { **env.x += 5; }
@@ -1664,13 +1663,10 @@ impl Debug for Statement<'_> {
             AscribeUserType(box (ref place, ref c_ty), ref variance) => {
                 write!(fmt, "AscribeUserType({:?}, {:?}, {:?})", place, variance, c_ty)
             }
-            Coverage(box ref coverage) => {
-                if let Some(rgn) = &coverage.code_region {
-                    write!(fmt, "Coverage::{:?} for {:?}", coverage.kind, rgn)
-                } else {
-                    write!(fmt, "Coverage::{:?}", coverage.kind)
-                }
+            Coverage(box self::Coverage { ref kind, code_region: Some(ref rgn) }) => {
+                write!(fmt, "Coverage::{:?} for {:?}", kind, rgn)
             }
+            Coverage(box ref coverage) => write!(fmt, "Coverage::{:?}", coverage.kind),
             CopyNonOverlapping(box crate::mir::CopyNonOverlapping {
                 ref src,
                 ref dst,
@@ -2061,11 +2057,11 @@ impl<'tcx> Operand<'tcx> {
         span: Span,
     ) -> Self {
         let ty = tcx.type_of(def_id).subst(tcx, substs);
-        Operand::Constant(box Constant {
+        Operand::Constant(Box::new(Constant {
             span,
             user_ty: None,
             literal: ConstantKind::Ty(ty::Const::zero_sized(tcx, ty)),
-        })
+        }))
     }
 
     pub fn is_move(&self) -> bool {
@@ -2092,11 +2088,11 @@ impl<'tcx> Operand<'tcx> {
             };
             scalar_size == type_size
         });
-        Operand::Constant(box Constant {
+        Operand::Constant(Box::new(Constant {
             span,
             user_ty: None,
-            literal: ConstantKind::Val(val.into(), ty),
-        })
+            literal: ConstantKind::Val(ConstValue::Scalar(val), ty),
+        }))
     }
 
     pub fn to_copy(&self) -> Self {
@@ -2458,7 +2454,7 @@ pub enum ConstantKind<'tcx> {
 impl Constant<'tcx> {
     pub fn check_static_ptr(&self, tcx: TyCtxt<'_>) -> Option<DefId> {
         match self.literal.const_for_ty()?.val.try_to_scalar() {
-            Some(Scalar::Ptr(ptr)) => match tcx.global_alloc(ptr.alloc_id) {
+            Some(Scalar::Ptr(ptr, _size)) => match tcx.global_alloc(ptr.provenance) {
                 GlobalAlloc::Static(def_id) => {
                     assert!(!tcx.is_thread_local_static(def_id));
                     Some(def_id)

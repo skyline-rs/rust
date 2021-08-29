@@ -24,20 +24,22 @@ use rustc_typeck::expr_use_visitor as euv;
 use std::borrow::Cow;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for functions taking arguments by value, but not
+    /// ### What it does
+    /// Checks for functions taking arguments by value, but not
     /// consuming them in its
     /// body.
     ///
-    /// **Why is this bad?** Taking arguments by reference is more flexible and can
+    /// ### Why is this bad?
+    /// Taking arguments by reference is more flexible and can
     /// sometimes avoid
     /// unnecessary allocations.
     ///
-    /// **Known problems:**
+    /// ### Known problems
     /// * This lint suggests taking an argument by reference,
     /// however sometimes it is better to let users decide the argument type
     /// (by using `Borrow` trait, for example), depending on how the function is used.
     ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// fn foo(v: Vec<i32>) {
     ///     assert_eq!(v.len(), 42);
@@ -103,7 +105,6 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
         }
 
         // Allow `Borrow` or functions to be taken by value
-        let borrow_trait = need!(get_trait_def_id(cx, &paths::BORROW_TRAIT));
         let allowed_traits = [
             need!(cx.tcx.lang_items().fn_trait()),
             need!(cx.tcx.lang_items().fn_once_trait()),
@@ -116,11 +117,11 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
         let fn_def_id = cx.tcx.hir().local_def_id(hir_id);
 
         let preds = traits::elaborate_predicates(cx.tcx, cx.param_env.caller_bounds().iter())
-            .filter(|p| !p.is_global())
+            .filter(|p| !p.is_global(cx.tcx))
             .filter_map(|obligation| {
                 // Note that we do not want to deal with qualified predicates here.
                 match obligation.predicate.kind().no_bound_vars() {
-                    Some(ty::PredicateKind::Trait(pred, _)) if pred.def_id() != sized_trait => Some(pred),
+                    Some(ty::PredicateKind::Trait(pred)) if pred.def_id() != sized_trait => Some(pred),
                     _ => None,
                 }
             })
@@ -167,7 +168,7 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
                 let preds = preds.iter().filter(|t| t.self_ty() == ty).collect::<Vec<_>>();
 
                 (
-                    preds.iter().any(|t| t.def_id() == borrow_trait),
+                    preds.iter().any(|t| cx.tcx.is_diagnostic_item(sym::Borrow, t.def_id())),
                     !preds.is_empty() && {
                         let ty_empty_region = cx.tcx.mk_imm_ref(cx.tcx.lifetimes.re_root_empty, ty);
                         preds.iter().all(|t| {
@@ -326,10 +327,8 @@ impl MovedVariablesCtxt {
 }
 
 impl<'tcx> euv::Delegate<'tcx> for MovedVariablesCtxt {
-    fn consume(&mut self, cmt: &euv::PlaceWithHirId<'tcx>, _: HirId, mode: euv::ConsumeMode) {
-        if let euv::ConsumeMode::Move = mode {
-            self.move_common(cmt);
-        }
+    fn consume(&mut self, cmt: &euv::PlaceWithHirId<'tcx>, _: HirId) {
+        self.move_common(cmt);
     }
 
     fn borrow(&mut self, _: &euv::PlaceWithHirId<'tcx>, _: HirId, _: ty::BorrowKind) {}

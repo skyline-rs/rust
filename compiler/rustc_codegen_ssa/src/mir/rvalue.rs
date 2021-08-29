@@ -220,34 +220,23 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     }
                     mir::CastKind::Pointer(PointerCast::Unsize) => {
                         assert!(bx.cx().is_backend_scalar_pair(cast));
-                        match operand.val {
+                        let (lldata, llextra) = match operand.val {
                             OperandValue::Pair(lldata, llextra) => {
                                 // unsize from a fat pointer -- this is a
-                                // "trait-object-to-supertrait" coercion, for
-                                // example, `&'a fmt::Debug + Send => &'a fmt::Debug`.
-
-                                // HACK(eddyb) have to bitcast pointers
-                                // until LLVM removes pointee types.
-                                let lldata = bx.pointercast(
-                                    lldata,
-                                    bx.cx().scalar_pair_element_backend_type(cast, 0, true),
-                                );
-                                OperandValue::Pair(lldata, llextra)
+                                // "trait-object-to-supertrait" coercion.
+                                (lldata, Some(llextra))
                             }
                             OperandValue::Immediate(lldata) => {
                                 // "standard" unsize
-                                let (lldata, llextra) = base::unsize_thin_ptr(
-                                    &mut bx,
-                                    lldata,
-                                    operand.layout.ty,
-                                    cast.ty,
-                                );
-                                OperandValue::Pair(lldata, llextra)
+                                (lldata, None)
                             }
                             OperandValue::Ref(..) => {
                                 bug!("by-ref operand {:?} in `codegen_rvalue_operand`", operand);
                             }
-                        }
+                        };
+                        let (lldata, llextra) =
+                            base::unsize_ptr(&mut bx, lldata, operand.layout.ty, cast.ty, llextra);
+                        OperandValue::Pair(lldata, llextra)
                     }
                     mir::CastKind::Pointer(PointerCast::MutToConstPointer)
                     | mir::CastKind::Misc
@@ -321,15 +310,15 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
 
                                 let er = scalar.valid_range_exclusive(bx.cx());
                                 if er.end != er.start
-                                    && scalar.valid_range.end() >= scalar.valid_range.start()
+                                    && scalar.valid_range.end >= scalar.valid_range.start
                                 {
                                     // We want `table[e as usize ± k]` to not
                                     // have bound checks, and this is the most
                                     // convenient place to put the `assume`s.
-                                    if *scalar.valid_range.start() > 0 {
+                                    if scalar.valid_range.start > 0 {
                                         let enum_value_lower_bound = bx
                                             .cx()
-                                            .const_uint_big(ll_t_in, *scalar.valid_range.start());
+                                            .const_uint_big(ll_t_in, scalar.valid_range.start);
                                         let cmp_start = bx.icmp(
                                             IntPredicate::IntUGE,
                                             llval,
@@ -339,7 +328,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                                     }
 
                                     let enum_value_upper_bound =
-                                        bx.cx().const_uint_big(ll_t_in, *scalar.valid_range.end());
+                                        bx.cx().const_uint_big(ll_t_in, scalar.valid_range.end);
                                     let cmp_end = bx.icmp(
                                         IntPredicate::IntULE,
                                         llval,
@@ -529,7 +518,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 };
                 let instance = ty::Instance::mono(bx.tcx(), def_id);
                 let r = bx.cx().get_fn_addr(instance);
-                let call = bx.call(r, &[llsize, llalign], None);
+                let ty = bx.type_func(&[bx.type_isize(), bx.type_isize()], bx.type_i8p());
+                let call = bx.call(ty, r, &[llsize, llalign], None);
                 let val = bx.pointercast(call, llty_ptr);
 
                 let operand = OperandRef { val: OperandValue::Immediate(val), layout: box_layout };
@@ -647,7 +637,14 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             mir::BinOp::BitOr => bx.or(lhs, rhs),
             mir::BinOp::BitAnd => bx.and(lhs, rhs),
             mir::BinOp::BitXor => bx.xor(lhs, rhs),
-            mir::BinOp::Offset => bx.inbounds_gep(lhs, &[rhs]),
+            mir::BinOp::Offset => {
+                let pointee_type = input_ty
+                    .builtin_deref(true)
+                    .unwrap_or_else(|| bug!("deref of non-pointer {:?}", input_ty))
+                    .ty;
+                let llty = bx.cx().backend_type(bx.cx().layout_of(pointee_type));
+                bx.inbounds_gep(llty, lhs, &[rhs])
+            }
             mir::BinOp::Shl => common::build_unchecked_lshift(bx, lhs, rhs),
             mir::BinOp::Shr => common::build_unchecked_rshift(bx, input_ty, lhs, rhs),
             mir::BinOp::Ne
@@ -904,7 +901,7 @@ fn cast_float_to_int<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     //
     // Performance note: Unordered comparison can be lowered to a "flipped"
     // comparison and a negation, and the negation can be merged into the
-    // select. Therefore, it not necessarily any more expensive than a
+    // select. Therefore, it not necessarily any more expensive than an
     // ordered ("normal") comparison. Whether these optimizations will be
     // performed is ultimately up to the backend, but at least x86 does
     // perform them.

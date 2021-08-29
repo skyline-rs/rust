@@ -45,11 +45,13 @@ use rustc_session::lint;
 use rustc_session::Session;
 use rustc_span::symbol::sym;
 use rustc_span::Span;
+use rustc_trait_selection::infer::InferCtxtExt;
 use rustc_trait_selection::traits;
 use rustc_trait_selection::traits::error_reporting::report_object_safety_error;
 
 /// Reifies a cast check to be checked once we have full type information for
 /// a function context.
+#[derive(Debug)]
 pub struct CastCheck<'tcx> {
     expr: &'tcx hir::Expr<'tcx>,
     expr_ty: Ty<'tcx>,
@@ -440,16 +442,10 @@ impl<'a, 'tcx> CastCheck<'tcx> {
                             let expr_ty = fcx.resolve_vars_if_possible(self.expr_ty);
                             let expr_ty = fcx.tcx.erase_regions(expr_ty);
                             let ty_params = fcx.tcx.mk_substs_trait(expr_ty, &[]);
-                            // Check for infer types because cases like `Option<{integer}>` would
-                            // panic otherwise.
-                            if !expr_ty.has_infer_types()
-                                && !ty.has_infer_types()
-                                && fcx.tcx.type_implements_trait((
-                                    from_trait,
-                                    ty,
-                                    ty_params,
-                                    fcx.param_env,
-                                ))
+                            if fcx
+                                .infcx
+                                .type_implements_trait(from_trait, ty, ty_params, fcx.param_env)
+                                .must_apply_modulo_regions()
                             {
                                 label = false;
                                 err.span_suggestion(
@@ -608,11 +604,10 @@ impl<'a, 'tcx> CastCheck<'tcx> {
         });
     }
 
+    #[instrument(skip(fcx), level = "debug")]
     pub fn check(mut self, fcx: &FnCtxt<'a, 'tcx>) {
-        self.expr_ty = fcx.structurally_resolved_type(self.span, self.expr_ty);
-        self.cast_ty = fcx.structurally_resolved_type(self.span, self.cast_ty);
-
-        debug!("check_cast({}, {:?} as {:?})", self.expr.hir_id, self.expr_ty, self.cast_ty);
+        self.expr_ty = fcx.structurally_resolved_type(self.expr.span, self.expr_ty);
+        self.cast_ty = fcx.structurally_resolved_type(self.cast_span, self.cast_ty);
 
         if !fcx.type_is_known_to_be_sized_modulo_regions(self.cast_ty, self.span) {
             self.report_cast_to_unsized_type(fcx);

@@ -116,14 +116,18 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 OperandRef::from_const(bx, value, ret_ty).immediate_or_packed_pair(bx)
             }
             sym::offset => {
+                let ty = substs.type_at(0);
+                let layout = bx.layout_of(ty);
                 let ptr = args[0].immediate();
                 let offset = args[1].immediate();
-                bx.inbounds_gep(ptr, &[offset])
+                bx.inbounds_gep(bx.backend_type(layout), ptr, &[offset])
             }
             sym::arith_offset => {
+                let ty = substs.type_at(0);
+                let layout = bx.layout_of(ty);
                 let ptr = args[0].immediate();
                 let offset = args[1].immediate();
-                bx.gep(ptr, &[offset])
+                bx.gep(bx.backend_type(layout), ptr, &[offset])
             }
             sym::copy => {
                 copy_intrinsic(
@@ -448,15 +452,14 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                             if ty.is_unsafe_ptr() {
                                 // Some platforms do not support atomic operations on pointers,
                                 // so we cast to integer first...
-                                let ptr_llty = bx.type_ptr_to(bx.type_isize());
+                                let llty = bx.type_isize();
+                                let ptr_llty = bx.type_ptr_to(llty);
                                 source = bx.pointercast(source, ptr_llty);
-                            }
-                            let result = bx.atomic_load(source, order, size);
-                            if ty.is_unsafe_ptr() {
+                                let result = bx.atomic_load(llty, source, order, size);
                                 // ... and then cast the result back to a pointer
                                 bx.inttoptr(result, bx.backend_type(layout))
                             } else {
-                                result
+                                bx.atomic_load(bx.backend_type(layout), source, order, size)
                             }
                         } else {
                             return invalid_monomorphization(ty);

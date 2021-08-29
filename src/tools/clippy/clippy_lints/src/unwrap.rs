@@ -1,4 +1,5 @@
 use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::higher;
 use clippy_utils::ty::is_type_diagnostic_item;
 use clippy_utils::{differing_macro_contexts, usage::is_potentially_mutated};
 use if_chain::if_chain;
@@ -13,13 +14,13 @@ use rustc_span::source_map::Span;
 use rustc_span::sym;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for calls of `unwrap[_err]()` that cannot fail.
+    /// ### What it does
+    /// Checks for calls of `unwrap[_err]()` that cannot fail.
     ///
-    /// **Why is this bad?** Using `if let` or `match` is more idiomatic.
+    /// ### Why is this bad?
+    /// Using `if let` or `match` is more idiomatic.
     ///
-    /// **Known problems:** None
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// # let option = Some(0);
     /// # fn do_something_with(_x: usize) {}
@@ -43,14 +44,17 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for calls of `unwrap[_err]()` that will always fail.
+    /// ### What it does
+    /// Checks for calls of `unwrap[_err]()` that will always fail.
     ///
-    /// **Why is this bad?** If panicking is desired, an explicit `panic!()` should be used.
+    /// ### Why is this bad?
+    /// If panicking is desired, an explicit `panic!()` should be used.
     ///
-    /// **Known problems:** This lint only checks `if` conditions not assignments.
+    /// ### Known problems
+    /// This lint only checks `if` conditions not assignments.
     /// So something like `let x: Option<()> = None; x.unwrap();` will not be recognized.
     ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// # let option = Some(0);
     /// # fn do_something_with(_x: usize) {}
@@ -157,11 +161,11 @@ impl<'a, 'tcx> Visitor<'tcx> for UnwrappableVariablesVisitor<'a, 'tcx> {
         if in_external_macro(self.cx.tcx.sess, expr.span) {
             return;
         }
-        if let ExprKind::If(cond, then, els) = &expr.kind {
+        if let Some(higher::If { cond, then, r#else }) = higher::If::hir(expr) {
             walk_expr(self, cond);
             self.visit_branch(cond, then, false);
-            if let Some(els) = els {
-                self.visit_branch(cond, els, true);
+            if let Some(else_inner) = r#else {
+                self.visit_branch(cond, else_inner, true);
             }
         } else {
             // find `unwrap[_err]()` calls:

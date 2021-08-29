@@ -4,7 +4,6 @@
 use std::path::PathBuf;
 
 use rustc_ast::{InlineAsmOptions, InlineAsmTemplatePiece};
-use rustc_codegen_ssa::back::linker::LinkerInfo;
 use rustc_codegen_ssa::{CodegenResults, CompiledModule, CrateInfo, ModuleKind};
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
@@ -290,14 +289,16 @@ pub(crate) fn run_aot(
         None
     };
 
+    // FIXME handle `-Ctarget-cpu=native`
+    let target_cpu =
+        tcx.sess.opts.cg.target_cpu.as_ref().unwrap_or(&tcx.sess.target.cpu).to_owned();
     Box::new((
         CodegenResults {
             modules,
             allocator_module,
             metadata_module,
             metadata,
-            linker_info: LinkerInfo::new(tcx, crate::target_triple(tcx.sess).to_string()),
-            crate_info: CrateInfo::new(tcx),
+            crate_info: CrateInfo::new(tcx, target_cpu),
         },
         work_products,
     ))
