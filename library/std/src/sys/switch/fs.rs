@@ -506,7 +506,11 @@ impl File {
                         "Attempted to seek to an invalid or negative offset"
                     ))
                 }
-                self.pos.store(self.attr.size() + (-offset as u64), Ordering::SeqCst);
+                if offset < 0 {
+                    self.pos.store(self.attr.size() - (-offset as u64), Ordering::SeqCst);
+                } else {
+                    self.pos.store(self.attr.size() + (offset as u64), Ordering::SeqCst);
+                }
             },
         };
 
