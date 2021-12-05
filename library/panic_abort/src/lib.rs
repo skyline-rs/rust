@@ -73,7 +73,7 @@ pub unsafe extern "C-unwind" fn __rust_start_panic(_payload: *mut &mut dyn BoxMe
                     fn sleep(amt: TimeSpan);
             }
 
-                #[repr(C)] struct TimeSpan { pub nanoseconds: u64 };
+                #[repr(C)] struct TimeSpan { pub nanoseconds: u64 }
 
                 sleep(TimeSpan { nanoseconds: 100000000 });
                 libc::abort();

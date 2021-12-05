@@ -2468,9 +2468,12 @@ checksum = "e4a24736216ec316047a1fc4252e27dabb04218aa4a3f37c6e7ddbf1f9782b54"
 [[package]]
 name = "nnsdk"
 version = "0.1.0"
-source = "git+https://github.com/ultimate-research/nnsdk-rs.git#29d3d1e3ca04a45f7fd489591e3237a29b371e18"
+source = "git+https://github.com/ultimate-research/nnsdk-rs.git#7dc0a123c2ccbefc443161c97096f02c6c3947d0"
 dependencies = [
+ "compiler_builtins",
  "libc-nnsdk 0.0.1 (git+https://github.com/ultimate-research/libc-nnsdk.git)",
+ "rustc-std-workspace-alloc",
+ "rustc-std-workspace-core",
 ]
 
 [[package]]
