@@ -11,7 +11,6 @@ pub fn target() -> Target {
         max_atomic_width: Some(128),
         panic_strategy: PanicStrategy::Abort,
         position_independent_executables: true,
-        unsupported_abis: super::arm_base::unsupported_abis(),
         crt_static_default: false,
         crt_static_respected: false,
         dynamic_linking: true,

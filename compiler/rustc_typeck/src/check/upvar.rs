@@ -1055,7 +1055,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             return None;
         }
 
-        let Some(root_var_min_capture_list) = min_captures.and_then(|m| m.get(&var_hir_id)) else {
+        let root_var_min_capture_list = if let Some(root_var_min_capture_list) =
+            min_captures.and_then(|m| m.get(&var_hir_id))
+        {
+            root_var_min_capture_list
+        } else {
             // The upvar is mentioned within the closure but no path starting from it is
             // used. This occurs when you have (e.g.)
             //
@@ -1066,14 +1070,15 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // ```
             debug!("no path starting from it is used");
 
-
             match closure_clause {
                 // Only migrate if closure is a move closure
                 hir::CaptureBy::Value => {
                     let mut diagnostics_info = FxHashSet::default();
-                    let upvars = self.tcx.upvars_mentioned(closure_def_id).expect("must be an upvar");
+                    let upvars =
+                        self.tcx.upvars_mentioned(closure_def_id).expect("must be an upvar");
                     let upvar = upvars[&var_hir_id];
-                    diagnostics_info.insert(UpvarMigrationInfo::CapturingNothing { use_span: upvar.span });
+                    diagnostics_info
+                        .insert(UpvarMigrationInfo::CapturingNothing { use_span: upvar.span });
                     return Some(diagnostics_info);
                 }
                 hir::CaptureBy::Ref => {}
@@ -1149,7 +1154,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         closure_clause: hir::CaptureBy,
         min_captures: Option<&ty::RootVariableMinCaptureList<'tcx>>,
     ) -> (Vec<NeededMigration>, MigrationWarningReason) {
-        let Some(upvars) = self.tcx.upvars_mentioned(closure_def_id) else {
+        let upvars = if let Some(upvars) = self.tcx.upvars_mentioned(closure_def_id) {
+            upvars
+        } else {
             return (Vec::new(), MigrationWarningReason::default());
         };
 
@@ -1753,7 +1760,9 @@ impl<'a, 'tcx> InferBorrowKind<'a, 'tcx> {
         diag_expr_id: hir::HirId,
     ) {
         let tcx = self.fcx.tcx;
-        let PlaceBase::Upvar(upvar_id) = place_with_id.place.base else {
+        let upvar_id = if let PlaceBase::Upvar(upvar_id) = place_with_id.place.base {
+            upvar_id
+        } else {
             return;
         };
 

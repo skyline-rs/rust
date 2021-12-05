@@ -716,27 +716,21 @@ impl<'tcx> Constructor<'tcx> {
         }
     }
 
-    /// Determines the constructor that the given pattern can be specialized to.
-    pub(super) fn from_pat<'p>(cx: &MatchCheckCtxt<'p, 'tcx>, pat: &'p Pat<'tcx>) -> Self {
-        match pat.kind.as_ref() {
-            PatKind::AscribeUserType { .. } => bug!(), // Handled by `expand_pattern`
-            PatKind::Binding { .. } | PatKind::Wild => Wildcard,
-            PatKind::Leaf { .. } | PatKind::Deref { .. } => Single,
-            &PatKind::Variant { variant_index, .. } => Variant(variant_index),
-            PatKind::Constant { value } => {
-                if let Some(int_range) = IntRange::from_const(cx.tcx, cx.param_env, value) {
-                    IntRange(int_range)
-                } else {
-                    match pat.ty.kind() {
-                        ty::Float(_) => FloatRange(value, value, RangeEnd::Included),
-                        // In `expand_pattern`, we convert string literals to `&CONST` patterns with
-                        // `CONST` a pattern of type `str`. In truth this contains a constant of type
-                        // `&str`.
-                        ty::Str => Str(value),
-                        // All constants that can be structurally matched have already been expanded
-                        // into the corresponding `Pat`s by `const_to_pat`. Constants that remain are
-                        // opaque.
-                        _ => Opaque,
+    /// The number of fields for this constructor. This must be kept in sync with
+    /// `Fields::wildcards`.
+    pub(super) fn arity(&self, pcx: PatCtxt<'_, '_, 'tcx>) -> usize {
+        match self {
+            Single | Variant(_) => match pcx.ty.kind() {
+                ty::Tuple(fs) => fs.len(),
+                ty::Ref(..) => 1,
+                ty::Adt(adt, ..) => {
+                    if adt.is_box() {
+                        // The only legal patterns of type `Box` (outside `std`) are `_` and box
+                        // patterns. If we're here we can assume this is a box pattern.
+                        1
+                    } else {
+                        let variant = &adt.variants[self.variant_index_for_adt(adt)];
+                        Fields::list_variant_nonhidden_fields(pcx.cx, pcx.ty, variant).count()
                     }
                 }
                 _ => bug!("Unexpected type for `Single` constructor: {:?}", pcx.ty),
@@ -989,20 +983,7 @@ impl<'tcx> SplitWildcard<'tcx> {
                     .collect();
 
                 if is_secretly_empty || is_declared_nonexhaustive {
-                    smallvec![NonExhaustive]
-                } else if cx.tcx.features().exhaustive_patterns {
-                    // If `exhaustive_patterns` is enabled, we exclude variants known to be
-                    // uninhabited.
-                    def.variants
-                        .iter_enumerated()
-                        .filter(|(_, v)| {
-                            !v.uninhabited_from(cx.tcx, substs, def.adt_kind(), cx.param_env)
-                                .contains(cx.tcx, cx.module)
-                        })
-                        .map(|(idx, _)| Variant(idx))
-                        .collect()
-                } else {
-                    def.variants.indices().map(|idx| Variant(idx)).collect()
+                    ctors.push(NonExhaustive);
                 }
                 ctors
             }

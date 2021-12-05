@@ -522,10 +522,13 @@ impl<'f, 'tcx> Coerce<'f, 'tcx> {
 
         let traits =
             (self.tcx.lang_items().unsize_trait(), self.tcx.lang_items().coerce_unsized_trait());
-        let (Some(unsize_did), Some(coerce_unsized_did)) = traits else {
-            debug!("missing Unsize or CoerceUnsized traits");
-            return Err(TypeError::Mismatch);
-        };
+        let (unsize_did, coerce_unsized_did) =
+            if let (Some(unsize_did), Some(coerce_unsized_did)) = traits {
+                (unsize_did, coerce_unsized_did)
+            } else {
+                debug!("missing Unsize or CoerceUnsized traits");
+                return Err(TypeError::Mismatch);
+            };
 
         // Note, we want to avoid unnecessary unsizing. We don't want to coerce to
         // a DST unless we have to. This currently comes out in the wash since
