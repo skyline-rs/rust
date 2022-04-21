@@ -51,6 +51,10 @@ jobs:
         echo "target_triple=x86_64-apple-darwin" >> $GITHUB_ENV
     - name: Package Release
       run: |
+        # Include tools (clippy, rustdoc, etc.) in build artifact
+        rm -rf build/${{ env.target_triple }}/stage2-tools/${{ env.target_triple }}/release/*/ # We only want executables
+        cp -r build/${{ env.target_triple }}/stage2-tools/${{ env.target_triple }}/release/* build/${{ env.target_triple }}/stage2
+        # Build the archive
         rust-zip build/${{ env.target_triple }}/stage2 build-${{ env.target_triple }}.zip
     - uses: actions/upload-artifact@v2
       with:
